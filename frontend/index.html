@@ -34,7 +34,7 @@
   <script>
     async function load() {
       // Adjust this path if serving from a different base URL
-      const res = await fetch('../data/meetings.json', {cache: 'no-store'});
+      const res = await fetch('data/meetings.json', { cache: 'no-store' });
       const data = await res.json();
       document.getElementById('lastChecked').textContent = 'Last checked (MT): ' + data.last_checked_mt;
       const groups = {};

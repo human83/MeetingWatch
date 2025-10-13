@@ -1,0 +1,7 @@
+requests
+beautifulsoup4
+pdfminer.six
+playwright
+pydantic
+python-dateutil
+pytz

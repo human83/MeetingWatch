@@ -1,0 +1,50 @@
+﻿name: Scrape and Update Meetings
+
+on:
+  schedule:
+    - cron: "17 13,20 * * *"   # ~07:17 & 14:17 MT
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install scraper deps
+        run: |
+          cd scraper
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          python -m playwright install --with-deps
+
+      - name: Run scraper
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
+        run: |
+          cd scraper
+          python main.py
+
+      - name: Commit changes
+        run: |
+          git config user.name "meeting-bot"
+          git config user.email "meeting-bot@users.noreply.github.com"
+          git add data/meetings.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "chore(data): update meetings.json"
+            git push
+          fi
+
+      - name: Ping Cloudflare Pages build hook (optional)
+        if: ${{ secrets.CF_PAGES_HOOK_URL != '' }}
+        run: |
+          curl -X POST "${{ secrets.CF_PAGES_HOOK_URL }}" || true

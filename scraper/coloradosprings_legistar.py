@@ -8,61 +8,58 @@ import pytz
 from .utils import make_meeting, clean_text, summarize_pdf_if_any
 
 MT = pytz.timezone("America/Denver")
-
 API = "https://webapi.legistar.com/v1/coloradosprings/events"
 
-# We only want City Council Meetings and Work Sessions, in the future
-WANTED_KEYWORDS = ("council",)   # body name contains this
-WANTED_TYPES = ("work session", "meeting")  # meeting type contains one of these
-
 def _is_wanted(body: str, mtg_type: str) -> bool:
-    b = (body or "").lower()
-    t = (mtg_type or "").lower()
+    """Loosened filter: any body that contains 'council' (any meeting type)."""
+    return "council" in (body or "").lower()
 
-    # Require "council" in the body name…
-    if "council" not in b:
-        return False
+def parse_legistar() -> List[Dict]:
+    today = datetime.now(MT).date()
+    in_120 = today + timedelta(days=120)
 
-    # …but accept ANY meeting type (work session, regular meeting, special, etc.)
-    # If you want to be stricter later, add keywords here.
-    return True
-
-    # OData filter: future window + only events with published titles/dates
-    # OData filter needs datetime'YYYY-MM-DDTHH:MM:SS'
+    # OData filter: future window; Legistar wants datetime'YYYY-MM-DDTHH:MM:SS'
     start = today.strftime("%Y-%m-%dT00:00:00")
     end   = in_120.strftime("%Y-%m-%dT23:59:59")
-    
+
     params = {
         "$filter": f"EventDate ge datetime'{start}' and EventDate le datetime'{end}'",
         "$orderby": "EventDate asc",
         "$top": 200,
     }
-    headers = {"Accept": "application/json"}
-r = requests.get(API, params=params, headers=headers, timeout=30)
-try:
-    r.raise_for_status()
-except Exception:
-    # helpful when OData filter formatting is off
-    print("Legistar error:", r.status_code, r.text[:300], "URL:", r.url)
-    raise
 
-items = r.json() or []
-print(f"Legistar: fetched {len(items)} events (URL: {r.url})")
+    headers = {"Accept": "application/json"}
+    r = requests.get(API, params=params, headers=headers, timeout=30)
+    try:
+        r.raise_for_status()
+    except Exception:
+        # Helpful when the OData filter formatting is off
+        print("Legistar error:", r.status_code, r.text[:300], "URL:", r.url)
+        raise
+
+    items = r.json() or []
+    print(f"Legistar: fetched {len(items)} events (URL: {r.url})")
 
     meetings: List[Dict] = []
     for ev in items:
         body = (ev.get("EventBodyName") or "").strip()
-        mtg_type = (ev.get("EventMeetingTypeName") or ev.get("EventMeetingType") or ev.get("EventAgendaStatusName") or "").strip()
+        mtg_type = (
+            ev.get("EventMeetingTypeName")
+            or ev.get("EventMeetingType")
+            or ev.get("EventAgendaStatusName")
+            or ""
+        ).strip()
+
         if not _is_wanted(body, mtg_type):
             continue
 
         # date & time
-        date_str = (ev.get("EventDate") or "").split("T")[0]  # e.g., 2025-10-27T00:00:00
+        date_str = (ev.get("EventDate") or "").split("T")[0]
         if not date_str:
             continue
-        # Legistar stores time in EventTime (minutes after midnight) sometimes; fall back to "Time TBD"
+
         mins = ev.get("EventTime", None)
-        if isinstance(mins, int) and 0 <= mins < 24*60:
+        if isinstance(mins, int) and 0 <= mins < 24 * 60:
             h, m = divmod(mins, 60)
             ampm = "AM" if h < 12 else "PM"
             h12 = h % 12 or 12
@@ -71,15 +68,18 @@ print(f"Legistar: fetched {len(items)} events (URL: {r.url})")
             start_time_local = "Time TBD"
 
         # links & location
-        agenda_url = (ev.get("EventAgendaFile") or ev.get("EventAgendaUrl") or "").strip() or None
+        agenda_url = (
+            (ev.get("EventAgendaFile") or ev.get("EventAgendaUrl") or "").strip()
+            or None
+        )
         location = clean_text(ev.get("EventLocation") or "")
 
         # summarize agenda (best effort)
         summary = []
         if agenda_url and agenda_url.lower().endswith(".pdf"):
             summary = summarize_pdf_if_any(agenda_url) or []
-            
-        print("Keeping:", ev.get("EventBodyName"), ev.get("EventMeetingTypeName"), ev.get("EventDate"))
+
+        print("Keeping:", body, mtg_type, ev.get("EventDate"))
 
         meetings.append(
             make_meeting(

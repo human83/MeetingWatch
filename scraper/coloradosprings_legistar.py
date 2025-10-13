@@ -28,8 +28,12 @@ def parse_legistar() -> List[Dict]:
     in_120 = today + timedelta(days=120)
 
     # OData filter: future window + only events with published titles/dates
+    # OData filter needs datetime'YYYY-MM-DDTHH:MM:SS'
+    start = today.strftime("%Y-%m-%dT00:00:00")
+    end   = in_120.strftime("%Y-%m-%dT23:59:59")
+    
     params = {
-        "$filter": f"EventDate ge {today.isoformat()} and EventDate le {in_120.isoformat()}",
+        "$filter": f"EventDate ge datetime'{start}' and EventDate le datetime'{end}'",
         "$orderby": "EventDate asc",
         "$top": 200,
     }

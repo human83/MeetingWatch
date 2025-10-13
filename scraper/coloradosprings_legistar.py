@@ -1,79 +1,84 @@
-import re, requests
-from bs4 import BeautifulSoup
-from datetime import datetime
-from .utils import make_meeting, clean_text, to_mt, is_future, MT_TZ
-from .summarize import llm_summarize
-from .pdf_utils import extract_pdf_text
-import tempfile, os
+# scraper/coloradosprings_legistar.py
+from __future__ import annotations
+from datetime import datetime, timedelta
+from typing import List, Dict
+import requests
+import pytz
 
-CAL_URL = "https://coloradosprings.legistar.com/Calendar.aspx"
+from .utils import make_meeting, clean_text, summarize_pdf_if_any
 
-def parse_legistar():
-    out = []
-    r = requests.get(CAL_URL, timeout=30)
+MT = pytz.timezone("America/Denver")
+
+API = "https://webapi.legistar.com/v1/coloradosprings/events"
+
+# We only want City Council Meetings and Work Sessions, in the future
+WANTED_KEYWORDS = ("council",)   # body name contains this
+WANTED_TYPES = ("work session", "meeting")  # meeting type contains one of these
+
+def _is_wanted(body: str, mtg_type: str) -> bool:
+    b = (body or "").lower()
+    t = (mtg_type or "").lower()
+    return any(k in b for k in WANTED_KEYWORDS) and any(k in t for k in WANTED_TYPES)
+
+def _iso_date_mt(dt: datetime) -> str:
+    return dt.astimezone(MT).strftime("%Y-%m-%d")
+
+def parse_legistar() -> List[Dict]:
+    today = datetime.now(MT).date()
+    in_120 = today + timedelta(days=120)
+
+    # OData filter: future window + only events with published titles/dates
+    params = {
+        "$filter": f"EventDate ge {today.isoformat()} and EventDate le {in_120.isoformat()}",
+        "$orderby": "EventDate asc",
+        "$top": 200,
+    }
+    r = requests.get(API, params=params, timeout=30)
     r.raise_for_status()
-    soup = BeautifulSoup(r.text, "html.parser")
-    # Rows in table with id 'ctl00_ContentPlaceHolder1_gridCalendar_ctl00'
-    rows = soup.select("table#ctl00_ContentPlaceHolder1_gridCalendar_ctl00 tr")
-    for tr in rows:
-        tds = tr.find_all("td")
-        if len(tds) < 6: 
+    items = r.json() or []
+
+    meetings: List[Dict] = []
+    for ev in items:
+        body = (ev.get("EventBodyName") or "").strip()
+        mtg_type = (ev.get("EventMeetingTypeName") or ev.get("EventMeetingType") or ev.get("EventAgendaStatusName") or "").strip()
+        if not _is_wanted(body, mtg_type):
             continue
-        # Date, Time, Location, Meeting Details, Agenda, Minutes
-        date_txt = clean_text(tds[0].get_text())
-        time_txt = clean_text(tds[1].get_text())
-        loc_txt = clean_text(tds[2].get_text())
-        title_txt = clean_text(tds[3].get_text())
-        # Filter for Council Meetings & Work Sessions
-        if not re.search(r"(Council|City Council)", title_txt, re.I):
+
+        # date & time
+        date_str = (ev.get("EventDate") or "").split("T")[0]  # e.g., 2025-10-27T00:00:00
+        if not date_str:
             continue
-        if not re.search(r"(Work Session|Regular|Meeting)", title_txt, re.I):
-            continue
-        # Build datetime
-        try:
-            dt = datetime.strptime(f"{date_txt} {time_txt}", "%m/%d/%Y %I:%M %p")
-            dt = to_mt(dt)
-        except Exception:
-            continue
-        if not is_future(dt): 
-            continue
-        # Agenda link
-        agenda_url = None
-        status = "Agenda not yet posted"
-        ag_a = tds[4].find("a")
-        if ag_a and ag_a.get("href"):
-            agenda_url = ag_a.get("href")
-            if not agenda_url.lower().startswith("http"):
-                agenda_url = "https://coloradosprings.legistar.com/" + agenda_url.lstrip("/")
-            status = "Agenda posted"
-        # meeting type heuristic
-        mtype = "Work Session" if re.search(r"Work Session", title_txt, re.I) else "City Council Meeting"
-        # summarize if agenda is a PDF
-        summary = "Agenda not posted yet"
+        # Legistar stores time in EventTime (minutes after midnight) sometimes; fall back to "Time TBD"
+        mins = ev.get("EventTime", None)
+        if isinstance(mins, int) and 0 <= mins < 24*60:
+            h, m = divmod(mins, 60)
+            ampm = "AM" if h < 12 else "PM"
+            h12 = h % 12 or 12
+            start_time_local = f"{h12}:{m:02d} {ampm}"
+        else:
+            start_time_local = "Time TBD"
+
+        # links & location
+        agenda_url = (ev.get("EventAgendaFile") or ev.get("EventAgendaUrl") or "").strip() or None
+        location = clean_text(ev.get("EventLocation") or "")
+
+        # summarize agenda (best effort)
+        summary = []
         if agenda_url and agenda_url.lower().endswith(".pdf"):
-            try:
-                pr = requests.get(agenda_url, timeout=30)
-                pr.raise_for_status()
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
-                    tf.write(pr.content)
-                    tf.flush()
-                    text = extract_pdf_text(tf.name)
-                os.unlink(tf.name)
-                bullets = llm_summarize(text, max_bullets=8)
-                summary = bullets
-            except Exception:
-                summary = "Agenda available but could not be summarized"
-        elif agenda_url:
-            summary = "Agenda available"
-        out.append(make_meeting(
-            city_or_body="Colorado Springs City Council",
-            meeting_type=mtype,
-            date=dt.strftime("%Y-%m-%d"),
-            start_time_local=dt.strftime("%-I:%M %p"),
-            location=loc_txt or None,
-            agenda_url=agenda_url,
-            status=status,
-            agenda_summary=summary,
-            source_url=CAL_URL
-        ))
-    return out
+            summary = summarize_pdf_if_any(agenda_url) or []
+
+        meetings.append(
+            make_meeting(
+                city_or_body="Colorado Springs — City Council",
+                meeting_type=mtg_type or "City Council Meeting",
+                date=date_str,
+                start_time_local=start_time_local,
+                status="Scheduled",
+                location=location or None,
+                agenda_url=agenda_url,
+                agenda_summary=summary,
+                source="https://coloradosprings.legistar.com/Calendar.aspx",
+            )
+        )
+
+    return meetings

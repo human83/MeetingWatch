@@ -5,3 +5,4 @@ playwright
 pydantic
 python-dateutil
 pytz
+openai

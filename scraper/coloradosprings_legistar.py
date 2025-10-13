@@ -18,14 +18,14 @@ WANTED_TYPES = ("work session", "meeting")  # meeting type contains one of these
 def _is_wanted(body: str, mtg_type: str) -> bool:
     b = (body or "").lower()
     t = (mtg_type or "").lower()
-    return any(k in b for k in WANTED_KEYWORDS) and any(k in t for k in WANTED_TYPES)
 
-def _iso_date_mt(dt: datetime) -> str:
-    return dt.astimezone(MT).strftime("%Y-%m-%d")
+    # Require "council" in the body name…
+    if "council" not in b:
+        return False
 
-def parse_legistar() -> List[Dict]:
-    today = datetime.now(MT).date()
-    in_120 = today + timedelta(days=120)
+    # …but accept ANY meeting type (work session, regular meeting, special, etc.)
+    # If you want to be stricter later, add keywords here.
+    return True
 
     # OData filter: future window + only events with published titles/dates
     # OData filter needs datetime'YYYY-MM-DDTHH:MM:SS'
@@ -37,9 +37,17 @@ def parse_legistar() -> List[Dict]:
         "$orderby": "EventDate asc",
         "$top": 200,
     }
-    r = requests.get(API, params=params, timeout=30)
+    headers = {"Accept": "application/json"}
+r = requests.get(API, params=params, headers=headers, timeout=30)
+try:
     r.raise_for_status()
-    items = r.json() or []
+except Exception:
+    # helpful when OData filter formatting is off
+    print("Legistar error:", r.status_code, r.text[:300], "URL:", r.url)
+    raise
+
+items = r.json() or []
+print(f"Legistar: fetched {len(items)} events (URL: {r.url})")
 
     meetings: List[Dict] = []
     for ev in items:
@@ -70,6 +78,8 @@ def parse_legistar() -> List[Dict]:
         summary = []
         if agenda_url and agenda_url.lower().endswith(".pdf"):
             summary = summarize_pdf_if_any(agenda_url) or []
+            
+        print("Keeping:", ev.get("EventBodyName"), ev.get("EventMeetingTypeName"), ev.get("EventDate"))
 
         meetings.append(
             make_meeting(

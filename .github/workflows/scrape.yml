@@ -2,9 +2,9 @@
 
 on:
   schedule:
-    - cron: "17 13,20 * * *"
+    - cron: "17 13,20 * * *"   # twice daily (approx 07:17 & 14:17 MT)
   workflow_dispatch:
-  
+
 permissions:
   contents: write
 
@@ -14,8 +14,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-        persist-credentials: true
 
       - name: Setup Python
         uses: actions/setup-python@v5

@@ -1,7 +1,9 @@
 # scraper/coloradosprings_legistar.py
 from __future__ import annotations
+
 from datetime import datetime, timedelta
 from typing import List, Dict
+
 import requests
 import pytz
 
@@ -10,17 +12,19 @@ from .utils import make_meeting, clean_text, summarize_pdf_if_any
 MT = pytz.timezone("America/Denver")
 API = "https://webapi.legistar.com/v1/coloradosprings/events"
 
+
 def _is_wanted(body: str, mtg_type: str) -> bool:
     """Loosened filter: any body that contains 'council' (any meeting type)."""
     return "council" in (body or "").lower()
+
 
 def parse_legistar() -> List[Dict]:
     today = datetime.now(MT).date()
     in_120 = today + timedelta(days=120)
 
-    # OData filter: future window; Legistar wants datetime'YYYY-MM-DDTHH:MM:SS'
+    # OData window, Legistar wants datetime'YYYY-MM-DDTHH:MM:SS'
     start = today.strftime("%Y-%m-%dT00:00:00")
-    end   = in_120.strftime("%Y-%m-%dT23:59:59")
+    end = in_120.strftime("%Y-%m-%dT23:59:59")
 
     params = {
         "$filter": f"EventDate ge datetime'{start}' and EventDate le datetime'{end}'",
@@ -30,10 +34,11 @@ def parse_legistar() -> List[Dict]:
 
     headers = {"Accept": "application/json"}
     r = requests.get(API, params=params, headers=headers, timeout=30)
+
     try:
         r.raise_for_status()
     except Exception:
-        # Helpful when the OData filter formatting is off
+        # Helpful when the OData filter is off
         print("Legistar error:", r.status_code, r.text[:300], "URL:", r.url)
         raise
 
@@ -53,11 +58,12 @@ def parse_legistar() -> List[Dict]:
         if not _is_wanted(body, mtg_type):
             continue
 
-        # date & time
+        # date
         date_str = (ev.get("EventDate") or "").split("T")[0]
         if not date_str:
             continue
 
+        # time (Legistar stores minutes after midnight as an integer)
         mins = ev.get("EventTime", None)
         if isinstance(mins, int) and 0 <= mins < 24 * 60:
             h, m = divmod(mins, 60)

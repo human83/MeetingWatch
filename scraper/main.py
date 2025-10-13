@@ -1,12 +1,10 @@
-import os, json, pytz
-from datetime import datetime
-from utils import now_mt
-from coloradosprings_legistar import parse_legistar
-from epc_agendasuite import parse_bocc
-from pueblo_civicclerk import parse_pueblo
-from trinidad_regular import parse_trinidad
-from alamosa_diligent import parse_alamosa
-from salida_civicclerk import parse_salida
+from .utils import now_mt
+from .coloradosprings_legistar import parse_legistar
+from .epc_agendasuite import parse_bocc
+from .pueblo_civicclerk import parse_pueblo
+from .trinidad_regular import parse_trinidad
+from .alamosa_diligent import parse_alamosa
+from .salida_civicclerk import parse_salida
 
 def run():
     meetings = []

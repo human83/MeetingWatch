@@ -29,8 +29,7 @@ jobs:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           LLM_PROVIDER: ${{ vars.LLM_PROVIDER }}
         run: |
-          cd scraper
-          python main.py
+          python -m scraper.main
 
       - name: Commit changes
         run: |

@@ -27,81 +27,154 @@
     <h1>Meeting Watch — Future Meetings</h1>
     <div class="small">Auto-updated by scheduled scrapes. Times shown in America/Denver.</div>
   </header>
+
   <div class="wrap">
     <div id="lastChecked" class="small"></div>
     <div id="content"></div>
   </div>
+
   <script>
+    function safeText(v) {
+      return (v ?? '').toString();
+    }
+
+    function parseDateTime(m) {
+      // Expect ISO-like date in m.date (YYYY-MM-DD) and a human time string
+      const d = safeText(m.date);
+      const t = safeText(m.start_time_local || m.time_local || '');
+      // Sort key: YYYY-MM-DD + HH:MM AM/PM converted to 24h if present
+      let sortKey = d;
+      if (t) {
+        const mt = t.match(/^(\d{1,2}):(\d{2})\s*([AP]M)$/i);
+        if (mt) {
+          let hh = parseInt(mt[1], 10);
+          const mm = mt[2];
+          const ap = mt[3].toUpperCase();
+          if (ap === 'PM' && hh !== 12) hh += 12;
+          if (ap === 'AM' && hh === 12) hh = 0;
+          sortKey += ' ' + String(hh).padStart(2, '0') + ':' + mm;
+        } else {
+          // Unknown time format -> push after known times but keep stable
+          sortKey += ' 99:99';
+        }
+      } else {
+        // No time -> sort to the end of the day
+        sortKey += ' 99:99';
+      }
+      return sortKey;
+    }
+
+    function displayTime(m) {
+      // Prefer start_time_local from scraper (or time_local legacy)
+      return safeText(m.start_time_local || m.time_local || 'Time TBD');
+    }
+
     async function load() {
-      // Adjust this path if serving from a different base URL
+      // IMPORTANT: correct relative path for GitHub Pages when hosted at /MeetingWatch
       const res = await fetch('data/meetings.json', { cache: 'no-store' });
+      if (!res.ok) {
+        document.getElementById('content').textContent = 'Failed to load meetings.json';
+        return;
+      }
       const data = await res.json();
-      document.getElementById('lastChecked').textContent = 'Last checked (MT): ' + data.last_checked_mt;
+
+      document.getElementById('lastChecked').textContent =
+        'Last checked (MT): ' + safeText(data.last_checked_mt);
+
+      // Group by city/body and sort meetings inside each group by date/time
       const groups = {};
-      for (const m of data.meetings) {
+      for (const m of (data.meetings || [])) {
         const key = m.city_or_body || m.jurisdiction || 'Unknown';
         if (!groups[key]) groups[key] = [];
         groups[key].push(m);
       }
+
       const container = document.getElementById('content');
       container.innerHTML = '';
+
       const sortedKeys = Object.keys(groups).sort();
       for (const k of sortedKeys) {
+        const list = groups[k].slice().sort((a,b) => {
+          const ka = parseDateTime(a);
+          const kb = parseDateTime(b);
+          return ka.localeCompare(kb);
+        });
+
         const gDiv = document.createElement('div');
         gDiv.className = 'group';
+
         const h = document.createElement('div');
         h.className = 'jur';
         h.textContent = k;
         gDiv.appendChild(h);
-        for (const m of groups[k]) {
+
+        for (const m of list) {
           const c = document.createElement('div');
           c.className = 'card';
+
+          // Title: DATE — TIME — TYPE
           const title = document.createElement('div');
-          title.innerHTML = `<strong>${m.date || ''} — ${m.start_time_local || ''} — ${m.meeting_type || ''}</strong>`;
+          const when = `${safeText(m.date)} — ${displayTime(m)} — ${safeText(m.meeting_type)}`;
+          title.innerHTML = `<strong>${when}</strong>`;
           c.appendChild(title);
+
+          // Meta: location
           const meta = document.createElement('div');
           meta.className = 'meta';
-          meta.textContent = (m.location || 'Location not listed');
+          meta.textContent = safeText(m.location || 'Location not listed');
           c.appendChild(meta);
+
+          // Chips: status, agenda link (if any)
           const chips = document.createElement('div');
           chips.className = 'chips';
-          const status = document.createElement('span');
-          status.className = 'chip';
-          status.textContent = m.status || 'Status unknown';
-          chips.appendChild(status);
+
+          if (m.status) {
+            const status = document.createElement('span');
+            status.className = 'chip';
+            status.textContent = m.status;
+            chips.appendChild(status);
+          }
+
           if (m.agenda_url) {
+            const linkChip = document.createElement('span');
+            linkChip.className = 'chip';
             const a = document.createElement('a');
             a.href = m.agenda_url;
             a.target = '_blank';
             a.rel = 'noopener';
             a.textContent = 'Agenda';
-            const chip = document.createElement('span');
-            chip.className = 'chip';
-            chip.appendChild(a);
-            chips.appendChild(chip);
+            linkChip.appendChild(a);
+            chips.appendChild(linkChip);
           }
+
           c.appendChild(chips);
+
+          // Agenda summary
           const summary = document.createElement('div');
           summary.className = 'bullets';
-          if (m.agenda_summary && m.agenda_summary.length) {
+
+          if (Array.isArray(m.agenda_summary) && m.agenda_summary.length) {
             const ul = document.createElement('ul');
             for (const s of m.agenda_summary) {
               const li = document.createElement('li');
-              li.textContent = s;
+              li.textContent = safeText(s);
               ul.appendChild(li);
             }
             summary.appendChild(ul);
-          } else if (m.agenda_summary && typeof m.agenda_summary === 'string') {
+          } else if (typeof m.agenda_summary === 'string' && m.agenda_summary.trim()) {
             summary.textContent = m.agenda_summary;
           } else {
             summary.innerHTML = '<span class="empty">Agenda not posted yet</span>';
           }
+
           c.appendChild(summary);
           gDiv.appendChild(c);
         }
+
         container.appendChild(gDiv);
       }
     }
+
     load();
   </script>
 </body>

@@ -1,11 +1,11 @@
-name: Scrape + Build + Deploy
+name: Scrape Build Deploy
 
 on:
   schedule:
-    - cron: "0 * * * *"      # every hour; tweak as needed
-  workflow_dispatch:         # manual run from the Actions tab
+    - cron: "0 * * * *"
+  workflow_dispatch:
   push:
-    branches: [ main ]       # optional: run on push too
+    branches: [ main ]
 
 permissions:
   contents: read
@@ -31,15 +31,15 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then
-          pip install -r requirements.txt
-        elif [ -f scraper/requirements.txt ]; then
-          pip install -r scraper/requirements.txt
-        else
-          echo "requirements.txt not found" && exit 1
-        fi
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            pip install -r requirements.txt
+          elif [ -f scraper/requirements.txt ]; then
+            pip install -r scraper/requirements.txt
+          else
+            echo "requirements.txt not found" && exit 1
+          fi
 
       - name: Run scraper
         run: |
@@ -69,8 +69,6 @@ jobs:
         run: |
           mkdir -p _site
           cp -r data _site/
-          # copy any other static files/assets your site needs here
-          # cp -r public/* _site/  # (example)
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

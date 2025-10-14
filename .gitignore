@@ -1,0 +1,16 @@
+﻿# ---- Python env & caches ----
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# ---- Generated data ----
+data/cache/
+data/meetings.json
+
+# ---- Logs ----
+*.log
+
+# ---- OS/editor noise (optional) ----
+.DS_Store
+Thumbs.db

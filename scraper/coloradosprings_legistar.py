@@ -1,6 +1,7 @@
 # scraper/coloradosprings_legistar.py
 from __future__ import annotations
 
+import os
 """
 Colorado Springs Legistar scraper (v1.3.1)
 ------------------------------------------
@@ -13,6 +14,9 @@ Colorado Springs Legistar scraper (v1.3.1)
 - Filters boilerplate from bullets; if we filter everything, keep a soft-fallback of a few cleaned lines
 - Returns list of meeting dicts shaped by utils.make_meeting
 """
+# Bullet limit follows repo-wide setting; falls back to 16 if not set
+BULLET_LIMIT = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "16"))
+
 
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
@@ -157,7 +161,7 @@ _DROP_PATTERNS = [
 ]
 _DROP_RE = re.compile("|".join(_DROP_PATTERNS), re.IGNORECASE)
 
-def _filter_bullets(bullets: List[str], *, limit: int = 10) -> List[str]:
+def _filter_bullets(bullets: List[str], *, limit: int = BULLET_LIMIT) -> List[str]:
     """
     Keep only newsy, self-contained lines:
     - drop headers/boilerplate (_DROP_RE)
@@ -191,7 +195,7 @@ def _filter_bullets(bullets: List[str], *, limit: int = 10) -> List[str]:
     if out:
         return out
 
-    # Soft fallback: keep up to 6 cleaned non-obvious lines
+    # Soft fallback: keep up to `limit` cleaned non-obvious lines
     soft: List[str] = []
     for b in bullets or []:
         line = clean_text(b)
@@ -204,7 +208,7 @@ def _filter_bullets(bullets: List[str], *, limit: int = 10) -> List[str]:
             continue
         seen.add(key)
         soft.append(line)
-        if len(soft) >= 6:
+        if len(soft) >= limit:
             break
     return soft
 
@@ -276,7 +280,7 @@ def parse_legistar() -> List[Dict]:
         if agenda_url:
             try:
                 raw_bullets = summarize_pdf_if_any(agenda_url) or []
-                summary = _filter_bullets(raw_bullets)
+                summary = _filter_bullets(raw_bullets, limit=BULLET_LIMIT)
             except Exception as e:
                 _LOG.warning("Agenda summary failed for %s: %s", agenda_url, e)
 

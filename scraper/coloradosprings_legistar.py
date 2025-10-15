@@ -220,9 +220,10 @@ def parse_legistar() -> List[Dict]:
     Returns a list of dicts created by utils.make_meeting.
     """
     today = datetime.now(MT).date()
+    yesterday = today - timedelta(days=1)
     in_120 = today + timedelta(days=120)
 
-    start = today.strftime("%Y-%m-%dT00:00:00")
+    start = yesterday.strftime("%Y-%m-%dT00:00:00")
     end = in_120.strftime("%Y-%m-%dT23:59:59")
 
     params = {

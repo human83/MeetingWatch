@@ -42,6 +42,9 @@ jobs:
           else
             echo "requirements.txt not found" && exit 1
           fi
+          
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium    
 
       - name: Print effective PDF limits
         run: |

@@ -89,7 +89,7 @@ def parse_alamosa() -> List[Dict]:
     items: List[Dict] = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context(user_agent="MeetingWatch/Alamosa-Diligent/0.9")
         page = context.new_page()
 

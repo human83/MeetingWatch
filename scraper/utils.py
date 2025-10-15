@@ -58,9 +58,9 @@ def make_meeting(
 # ------------------------------
 # Tunables via environment
 # ------------------------------
-_DEFAULT_MAX_PAGES = int(os.getenv("PDF_SUMMARY_MAX_PAGES", "8"))
-_DEFAULT_MAX_CHARS = int(os.getenv("PDF_SUMMARY_MAX_CHARS", "16000"))
-_DEFAULT_HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SEC", "20"))
+_DEFAULT_MAX_PAGES = int(os.getenv("PDF_SUMMARY_MAX_PAGES", "25"))
+_DEFAULT_MAX_CHARS = int(os.getenv("PDF_SUMMARY_MAX_CHARS", "72000"))
+_DEFAULT_HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SEC", "32"))
 _DEFAULT_REQ_TIMEOUT = float(os.getenv("PDF_HTTP_TIMEOUT_SEC", str(_DEFAULT_HTTP_TIMEOUT)))
 _DEFAULT_MODEL = os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini")
 _MAX_BULLETS = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "12"))

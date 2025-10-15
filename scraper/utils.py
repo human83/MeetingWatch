@@ -1,4 +1,4 @@
-# scraper/utils.py (v3.1 — AI-first summarizer; robust JSON/bullets parsing; stricter filters; optional strict mode)
+# scraper/utils.py (v3.2 — AI-first summarizer; full-text rules; merge LLM + rules; debug hooks)
 from __future__ import annotations
 
 from datetime import datetime
@@ -32,19 +32,48 @@ def is_future(dt: datetime) -> bool:
 def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "")).strip()
 
-def make_meeting(city_or_body: str, meeting_type: str, date: str, start_time_local: str, status: str, location: Optional[str], agenda_url: Optional[str], agenda_summary, source: str) -> Dict:
-    return {"city_or_body": city_or_body,"meeting_type": meeting_type,"date": date,"start_time_local": start_time_local,"status": status,"location": location,"agenda_url": agenda_url,"agenda_summary": agenda_summary,"source": source}
+def make_meeting(
+    city_or_body: str,
+    meeting_type: str,
+    date: str,
+    start_time_local: str,
+    status: str,
+    location: Optional[str],
+    agenda_url: Optional[str],
+    agenda_summary,
+    source: str,
+) -> Dict:
+    return {
+        "city_or_body": city_or_body,
+        "meeting_type": meeting_type,
+        "date": date,
+        "start_time_local": start_time_local,
+        "status": status,
+        "location": location,
+        "agenda_url": agenda_url,
+        "agenda_summary": agenda_summary,
+        "source": source,
+    }
 
+# ------------------------------
+# Tunables via environment
+# ------------------------------
 _DEFAULT_MAX_PAGES = int(os.getenv("PDF_SUMMARY_MAX_PAGES", "8"))
 _DEFAULT_MAX_CHARS = int(os.getenv("PDF_SUMMARY_MAX_CHARS", "16000"))
 _DEFAULT_HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SEC", "20"))
 _DEFAULT_REQ_TIMEOUT = float(os.getenv("PDF_HTTP_TIMEOUT_SEC", str(_DEFAULT_HTTP_TIMEOUT)))
 _DEFAULT_MODEL = os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini")
+_MAX_BULLETS = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "12"))
 _DISABLE_SUMMARIZER = os.getenv("SUMMARIZER_DISABLE", "").strip() == "1"
 _SUMMARIZER_STRICT = os.getenv("SUMMARIZER_STRICT", "").strip() == "1"
+_DEBUG = os.getenv("PDF_SUMMARY_DEBUG", "").strip() == "1"
+
 _CACHE_DIR = Path(os.getenv("SUMMARY_CACHE_DIR", "data/cache/agenda_summaries"))
 _CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
+# ------------------------------
+# Filters / Signals
+# ------------------------------
 _DROP_PATTERNS = [
     r"^city of colorado springs\b",
     r"\bcouncil work session\b",
@@ -71,15 +100,19 @@ _DROP_PATTERNS = [
 ]
 _DROP_RE = re.compile("|".join(_DROP_PATTERNS), re.IGNORECASE)
 
+# broaden to catch “hearing date”, “set public hearing”, etc.
 _POSITIVE_SIGNALS = re.compile(
     r"\b(ordinance|resolution|budget|appropriation|rate case|rate changes|zoning|rezoning|variance|annexation|"
     r"service plan|metropolitan district|metropolitan\s+district|md\b|acquisition of real property|acquire real property|"
     r"plat|subdivision|permit|license|fee|rate|tax|mill levy|bond|grant|contract|agreement|rfp|rfq|procurement|purchase|"
-    r"public hearing|hearing date|set the public hearing|set.*public hearing|"
+    r"public hearing|hearing date|set.*public hearing|set the public hearing|"
     r"utility|utilities|water|sewer|storm|airport|transit|transportation|street|road|bridge|housing|affordable housing)\b",
     re.IGNORECASE,
 )
 
+# ------------------------------
+# PDF helpers
+# ------------------------------
 def _looks_like_pdf_url(url: str) -> bool:
     return bool(re.search(r"\.pdf($|\?)", url, flags=re.IGNORECASE))
 
@@ -102,6 +135,7 @@ def _download_pdf_bytes(url: str, *, timeout: float) -> Optional[bytes]:
         return None
 
 def _extract_first_pages_text(pdf_bytes: bytes, *, max_pages: int) -> Optional[str]:
+    """Extract text from the first max_pages pages. Caller chooses max_pages via env."""
     try:
         from pdfminer.high_level import extract_text
     except Exception:
@@ -115,11 +149,15 @@ def _extract_first_pages_text(pdf_bytes: bytes, *, max_pages: int) -> Optional[s
     except Exception:
         return None
 
+# ------------------------------
+# LLM summary
+# ------------------------------
 def _openai_bullets(text: str, *, model: str) -> Optional[List[str]]:
     try:
         from openai import OpenAI
     except Exception:
         return None
+
     client = OpenAI()
     t = text
     max_chars = _DEFAULT_MAX_CHARS
@@ -127,65 +165,96 @@ def _openai_bullets(text: str, *, model: str) -> Optional[List[str]]:
         head = t[: int(max_chars * 0.7)]
         tail = t[-int(max_chars * 0.3):]
         t = head + "\n...\n" + tail
-    system = ("You are a newsroom assistant. Read city-meeting agenda text and extract only the most news-worthy, "
-              "actionable items for journalists. Prefer motions, ordinances, spending amounts, rate/fee/tax changes, "
-              "annexations/rezones, public hearing dates, contracts/grants, and official actions. "
-              "Exclude TV/ADA boilerplate, procedural items (Call to Order, minutes), attachments/exhibits, and generic headers.")
-    user_json = ("Return a JSON array of 6–12 short, self-contained bullets (strings). AGENDA TEXT BEGIN\n" + t + "\nAGENDA TEXT END\nReturn ONLY JSON.")
-    user_bullets = ("If you cannot produce valid JSON, return 6–12 bullets, one per line, each prefixed with '- '. AGENDA TEXT BEGIN\n" + t + "\nAGENDA TEXT END\nDo not include any other text.")
+
+    system = (
+        "You are a newsroom assistant. Read city-meeting agenda text and extract only the most news-worthy, "
+        "actionable items for journalists. Prefer motions, ordinances, spending amounts, rate/fee/tax changes, "
+        "annexations/rezones, public hearing dates, contracts/grants, and official actions. "
+        "Exclude TV/ADA boilerplate, procedural items (Call to Order, minutes), attachments/exhibits, and generic headers."
+    )
+    user_json = (
+        "Return a JSON array of 6–12 short, self-contained bullets (strings). "
+        "AGENDA TEXT BEGIN\n" + t + "\nAGENDA TEXT END\nReturn ONLY JSON."
+    )
+    user_bullets = (
+        "If you cannot produce valid JSON, return 6–12 bullets, one per line, "
+        "each prefixed with '- '. AGENDA TEXT BEGIN\n" + t + "\nAGENDA TEXT END\nDo not include any other text."
+    )
+
+    # Try JSON first
     try:
-        r = client.responses.create(model=model, input=[{"role":"system","content":system},{"role":"user","content":user_json}], temperature=0.2)
+        r = client.responses.create(
+            model=model,
+            input=[{"role": "system", "content": system}, {"role": "user", "content": user_json}],
+            temperature=0.2,
+        )
         raw = (getattr(r, "output_text", "") or "").strip()
         if raw:
-            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE|re.DOTALL)
+            raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.IGNORECASE | re.DOTALL)
             try:
                 data = json.loads(raw)
                 if isinstance(data, list):
-                    return [clean_text(str(x)) for x in data if clean_text(str(x))][:12] or None
+                    return [clean_text(str(x)) for x in data if clean_text(str(x))][: _MAX_BULLETS] or None
             except Exception:
                 pass
     except Exception:
         pass
+
+    # Fallback: plain lines
     try:
-        r = client.responses.create(model=model, input=[{"role":"system","content":system},{"role":"user","content":user_bullets}], temperature=0.2)
+        r = client.responses.create(
+            model=model,
+            input=[{"role": "system", "content": system}, {"role": "user", "content": user_bullets}],
+            temperature=0.2,
+        )
         raw = (getattr(r, "output_text", "") or "").strip()
         if raw:
             lines = [re.sub(r"^[-•*]\s*", "", ln.strip()) for ln in raw.splitlines()]
             lines = [clean_text(ln) for ln in lines if clean_text(ln)]
-            return lines[:12] or None
+            return lines[: _MAX_BULLETS] or None
     except Exception:
         pass
+
+    # Legacy chat API
     try:
-        r = client.chat.completions.create(model=model, messages=[{"role":"system","content":system},{"role":"user","content":user_bullets}], temperature=0.2)
+        r = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_bullets}],
+            temperature=0.2,
+        )
         raw = (r.choices[0].message.content or "").strip()
         if raw:
             lines = [re.sub(r"^[-•*]\s*", "", ln.strip()) for ln in raw.splitlines()]
             lines = [clean_text(ln) for ln in lines if clean_text(ln)]
-            return lines[:12] or None
+            return lines[: _MAX_BULLETS] or None
     except Exception:
         pass
+
     return None
 
+# ------------------------------
+# Rule / Heuristic passes
+# ------------------------------
 _SECTION_START = re.compile(r"^\s*(\d+(?:\.[A-Z])?\.)\s+(.*)", re.IGNORECASE)
 
-def _legistar_rule_based_bullets(text: str, *, limit: int = 12) -> List[str]:
+def _legistar_rule_based_bullets(text: str, *, limit: int = 24) -> List[str]:
+    """Extract likely decision items from full agenda text (no 'Consent' slicing)."""
     lines = [l.strip() for l in text.splitlines()]
-    for i, ln in enumerate(lines):
-        if re.search(r"\bConsent Calendar\b", ln, re.IGNORECASE):
-            lines = lines[i:]
-            break
     bullets: List[str] = []
-    i = 0
-    n = len(lines)
+    i, n = 0, len(lines)
+
     def is_header(s: str) -> bool:
         return bool(_SECTION_START.match(s))
+
     def is_noise(s: str) -> bool:
         return (not s) or _DROP_RE.search(s) is not None
+
     while i < n and len(bullets) < limit:
         ln = lines[i]
         if is_noise(ln):
             i += 1
             continue
+
         m = _SECTION_START.match(ln)
         if m:
             head = re.sub(r"^\s*\d+(?:\.[A-Z])?\.\s*", "", ln).strip()
@@ -204,13 +273,19 @@ def _legistar_rule_based_bullets(text: str, *, limit: int = 12) -> List[str]:
             candidate = re.sub(r"\s+", " ", candidate)
             if (not head or head.endswith(":")) and chunk_parts:
                 candidate = " ".join(chunk_parts)
-            if candidate and not _DROP_RE.search(candidate) and (_POSITIVE_SIGNALS.search(candidate) or re.search(r"[\d$]", candidate)):
+            if candidate and not _DROP_RE.search(candidate) and (
+                _POSITIVE_SIGNALS.search(candidate) or re.search(r"[\d$]", candidate)
+            ):
                 bullets.append(clean_text(candidate))
             i = j
             continue
+
+        # non-numbered lines that still look substantive
         if _POSITIVE_SIGNALS.search(ln) or re.search(r"[\d$]", ln):
             bullets.append(clean_text(ln))
         i += 1
+
+    # dedupe / trim
     out, seen = [], set()
     for b in bullets:
         k = b.lower()
@@ -224,7 +299,7 @@ def _legistar_rule_based_bullets(text: str, *, limit: int = 12) -> List[str]:
             break
     return out
 
-def _heuristic_bullets(text: str, *, max_items: int = 12) -> List[str]:
+def _heuristic_bullets(text: str, *, max_items: int = 20) -> List[str]:
     bullets: List[str] = []
     for raw in text.splitlines():
         line = clean_text(raw)
@@ -266,13 +341,27 @@ def _post_filter_bullets(bullets: List[str], *, limit: int = 10) -> List[str]:
             break
     return out
 
+# ------------------------------
+# Summarize (download → extract → LLM → rules → merge → cache)
+# ------------------------------
 def _cache_path(url: str, *, max_pages: int, model: str) -> Path:
     h = hashlib.sha1(f"{url}|{max_pages}|{model}".encode("utf-8")).hexdigest()
     return _CACHE_DIR / f"{h}.json"
 
-def summarize_pdf_if_any(url: Optional[str], *, max_pages: int = _DEFAULT_MAX_PAGES, model: str = _DEFAULT_MODEL, timeout: float = _DEFAULT_REQ_TIMEOUT) -> List[str]:
+def _meta_path(url: str, *, max_pages: int, model: str) -> Path:
+    h = hashlib.sha1(f"{url}|{max_pages}|{model}".encode("utf-8")).hexdigest()
+    return _CACHE_DIR / f"{h}.meta.json"
+
+def summarize_pdf_if_any(
+    url: Optional[str],
+    *,
+    max_pages: int = _DEFAULT_MAX_PAGES,
+    model: str = _DEFAULT_MODEL,
+    timeout: float = _DEFAULT_REQ_TIMEOUT,
+) -> List[str]:
     if _DISABLE_SUMMARIZER or not url:
         return []
+
     cache_fp = _cache_path(url, max_pages=max_pages, model=model)
     try:
         if cache_fp.exists():
@@ -281,21 +370,60 @@ def summarize_pdf_if_any(url: Optional[str], *, max_pages: int = _DEFAULT_MAX_PA
                 return data
     except Exception:
         pass
+
     pdf_bytes = _download_pdf_bytes(url, timeout=timeout)
     if not pdf_bytes:
         return []
+
     text = _extract_first_pages_text(pdf_bytes, max_pages=max_pages)
     if not text:
         return []
-    bullets = _openai_bullets(text, model=model)
-    bullets = _post_filter_bullets(bullets) if bullets else []
-    if not bullets and not _SUMMARIZER_STRICT:
-        bullets = _post_filter_bullets(_legistar_rule_based_bullets(text))
-    if not bullets and not _SUMMARIZER_STRICT:
-        bullets = _post_filter_bullets(_heuristic_bullets(text))
+
+    # 1) LLM pass
+    bullets_llm = _openai_bullets(text, model=model) or []
+
+    # 2) Rules/heuristics over FULL text (no early 'Consent Calendar' slice)
+    rules_raw = _legistar_rule_based_bullets(text, limit=max(24, _MAX_BULLETS * 2))
+    rules_best = _post_filter_bullets(rules_raw, limit=max(24, _MAX_BULLETS * 2))
+
+    # 3) Merge, keeping LLM first, then add any new rule-based items it missed
+    merged: List[str] = []
+    seen = set()
+    for src in (bullets_llm, rules_best):
+        for b in src:
+            k = clean_text(b).lower()
+            if not k or k in seen:
+                continue
+            merged.append(clean_text(b))
+            seen.add(k)
+            if len(merged) >= _MAX_BULLETS:
+                break
+        if len(merged) >= _MAX_BULLETS:
+            break
+
+    # 4) If still empty and not strict, try a lightweight heuristic pass
+    if not merged and not _SUMMARIZER_STRICT:
+        merged = _post_filter_bullets(_heuristic_bullets(text, max_items=24), limit=_MAX_BULLETS)
+
+    # Cache + optional meta for debugging
     try:
         cache_fp.parent.mkdir(parents=True, exist_ok=True)
-        cache_fp.write_text(json.dumps(bullets, ensure_ascii=False, indent=2), encoding="utf-8")
+        cache_fp.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+        if _DEBUG:
+            meta = {
+                "url": url,
+                "max_pages": max_pages,
+                "model": model,
+                "bullets_llm": len(bullets_llm),
+                "rules_raw": len(rules_raw),
+                "rules_best": len(rules_best),
+                "merged": len(merged),
+                "max_bullets": _MAX_BULLETS,
+            }
+            _meta_path(url, max_pages=max_pages, model=model).write_text(
+                json.dumps(meta, indent=2), encoding="utf-8"
+            )
     except Exception:
         pass
-    return bullets
+
+    return merged

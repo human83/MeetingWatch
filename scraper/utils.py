@@ -355,7 +355,7 @@ def _legistar_rule_based_bullets(text: str, *, limit: int = 24) -> List[str]:
             break
     return out
 
-def _heuristic_bullets(text: str, *, max_items: int = 20) -> List[str]:
+def _heuristic_bullets(text: str, *, max_items: int = 36) -> List[str]:
     bullets: List[str] = []
     for raw in text.splitlines():
         line = clean_text(raw)
@@ -454,7 +454,7 @@ def summarize_pdf_if_any(
     bullets_llm = _openai_bullets(text, model=model) or []
 
     # 2) Rules/heuristics over FULL text (no early 'Consent Calendar' slice)
-    rules_raw = _legistar_rule_based_bullets(text, limit=max(24, _MAX_BULLETS * 2))
+    rules_raw = _legistar_rule_based_bullets(text, limit=max(36, _MAX_BULLETS * 3))
     rules_best = _post_filter_bullets(rules_raw, limit=max(24, _MAX_BULLETS * 2))
 
     # 3) Merge, keeping LLM first, then add any new rule-based items it missed
@@ -474,7 +474,7 @@ def summarize_pdf_if_any(
 
     # 4) If still empty and not strict, try a lightweight heuristic pass
     if not merged and not _SUMMARIZER_STRICT:
-        merged = _post_filter_bullets(_heuristic_bullets(text, max_items=24), limit=_MAX_BULLETS)
+        merged = _post_filter_bullets(_heuristic_bullets(text, max_items=36), limit=_MAX_BULLETS)
 
     # Cache + optional meta for debugging
     try:

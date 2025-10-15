@@ -151,14 +151,11 @@ def _is_single_topic_agenda(text: str) -> Optional[str]:
     for ln in lines:
         if not ln or _DROP_RE.search(ln) or _SINGLE_TOPIC_HEADINGS.search(ln):
             continue
-        # Prefer concise topical lines without obvious boilerplate
         if 3 <= len(ln.split()) <= 20 and not re.search(
             r"\b(roll call|adjourn|call to order|channel|stream|presenter|attachments?)\b",
             ln, re.IGNORECASE
         ):
             candidates.append(ln)
-
-    # Prefer lines containing strong topical keywords
     for kw in ("budget", "zoning", "ordinance", "rate case", "hearing"):
         for ln in candidates:
             if re.search(kw, ln, re.IGNORECASE):
@@ -192,9 +189,12 @@ def _download_pdf_bytes(url: str, *, timeout: float) -> Optional[bytes]:
 def _extract_first_pages_text(pdf_bytes: bytes, *, max_pages: int) -> Optional[str]:
     """Extract text from the first max_pages pages. Caller chooses max_pages via env."""
     try:
-        from pdfminer.high_level import extract_text
+        from pdfminer_high_level import extract_text  # if your project uses pdfminer.six as pdfminer.six.high_level
     except Exception:
-        return None
+        try:
+            from pdfminer.high_level import extract_text  # fallback for common import path
+        except Exception:
+            return None
     try:
         with io.BytesIO(pdf_bytes) as fh:
             txt = extract_text(fh, page_numbers=range(max_pages)) or ""

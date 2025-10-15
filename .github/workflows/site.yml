@@ -16,7 +16,8 @@ env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
   SUMMARIZER_MODEL: gpt-4o-mini
   PDF_SUMMARY_MAX_PAGES: '20'
-  PDF_SUMMARY_MAX_CHARS: '24000'
+  PDF_SUMMARY_MAX_CHARS: '48000'
+  PDF_SUMMARY_DEBUG: '1'
 
 jobs:
   scrape:
@@ -40,6 +41,9 @@ jobs:
           else
             echo "requirements.txt not found" && exit 1
           fi
+
+      - name: Clear agenda summary cache
+        run: rm -rf data/cache/agenda_summaries || true
 
       - name: Run scraper
         run: |

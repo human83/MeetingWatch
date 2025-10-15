@@ -135,7 +135,7 @@ jobs:
               bullets = m.get('agenda_summary') or []
               if isinstance(bullets, str):
                   bullets = [bullets]
-              bullets = [html.escape(str(b)) for b in bullets][:8]
+              bullets = [html.escape(str(b)) for b in bullets]
 
               parts.append('<div class="m">')
               parts.append(f'<div class="meta"><strong>{date}</strong> {time}{agenda_link}</div>')

@@ -69,6 +69,7 @@ jobs:
         run: |
           mkdir -p _site
           cp -r data _site/
+          echo "<html><body><h1>MeetingWatch Data</h1><pre>$(ls -1 data)</pre></body></html>" > _site/index.html
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

@@ -144,8 +144,8 @@ jobs:
               loc   = html.escape(m.get('location') or '')
               agenda_url = m.get('agenda_url') or m.get('agenda_pdf') or ''
               agenda_link = f' &middot; <a href="{html.escape(agenda_url)}">agenda</a>' if agenda_url else ''
-    source_url = m.get('source') or ''
-    source_link = f' &middot; <a href="{html.escape(source_url)}">source</a>' if source_url else ''
+              source_url = m.get('source') or ''
+              source_link = f' &middot; <a href=\"{html.escape(source_url)}\">source</a>' if source_url else ''
 
               # bullets can be str or list
               bullets = m.get('agenda_summary') or []

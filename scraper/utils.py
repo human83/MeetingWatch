@@ -1,4 +1,4 @@
-# scraper/utils.py (v3.2 — AI-first summarizer; full-text rules; merge LLM + rules; debug hooks)
+# scraper/utils.py (v3.3 — single-topic detector; broader drops; AI-first; full-text rules; merge; debug hooks)
 from __future__ import annotations
 
 from datetime import datetime
@@ -78,11 +78,28 @@ _DROP_PATTERNS = [
     r"^city of colorado springs\b",
     r"\bcouncil work session\b",
     r"\bregular meeting agenda\b",
+    # Watching / streaming / channels
+    r"\bHow to Watch\b",
+    r"\bHow to Watch the Meeting\b",
+    r"\bFacebook Live\b",
+    r"\bSPRINGS\s*TV\b",
+    r"\bComcast\s*Channel\b",
+    r"\bChannel\s*\d+\b",
+    r"\bStratus\s*IQ\s*Channel\b",
+    r"\bStreaming\b|\bStream\b",
     r"channel\s*18|livestream|televised|broadcast",
+    # Accessibility boilerplate
     r"americans? with disabilities act|ADA\b|auxiliary aid|48 hours before",
+    # Procedural items
     r"\bcall to order\b|\broll call\b|\bpledge of allegiance\b|\bapproval of (the )?minutes\b|\badjourn",
     r"\bmeeting minutes\b",
     r"\bfirst presentation\b|\bsecond presentation\b",
+    # Attachments / presenters / staff
+    r"^\s*Attachments?\s*:.*$",
+    r"^\s*Presenter\s*:.*$",
+    r"^\s*Staff\s*Presentation\b.*$",
+    r"^\s*Staff\s*Report\b.*$",
+    # Misc boilerplate
     r"documents created by third parties may not meet all accessibilit",
     r"how to watch the meeting|how to comment on agenda items",
     r"^page\s*\d+\b",
@@ -97,6 +114,9 @@ _DROP_PATTERNS = [
     r"\.(pdf|docx|xlsx)\b",
     r"^[0-9]+_[A-Z]{2}\b",
     r"^[0-9A-Z. -]+:$",
+    # Generic section headings we never want as bullets
+    r"^\s*Items Under Study\s*$",
+    r"^\s*Public Comment\s*$",
 ]
 _DROP_RE = re.compile("|".join(_DROP_PATTERNS), re.IGNORECASE)
 
@@ -109,6 +129,41 @@ _POSITIVE_SIGNALS = re.compile(
     r"utility|utilities|water|sewer|storm|airport|transit|transportation|street|road|bridge|housing|affordable housing)\b",
     re.IGNORECASE,
 )
+
+# ------------------------------
+# Single-topic detector (work/study sessions → 1 bullet)
+# ------------------------------
+_SINGLE_TOPIC_HINTS = re.compile(
+    r"(work session|study session|retreat|budget work session|planning workshop)",
+    re.IGNORECASE,
+)
+_SINGLE_TOPIC_HEADINGS = re.compile(
+    r"^\s*(items under study|new business|discussion|agenda|call to order|adjourn|public comment)\s*$",
+    re.IGNORECASE,
+)
+
+def _is_single_topic_agenda(text: str) -> Optional[str]:
+    """Return a single topical title if this looks like a single-topic agenda, else None."""
+    if not _SINGLE_TOPIC_HINTS.search(text):
+        return None
+    lines = [clean_text(ln) for ln in text.splitlines()]
+    candidates: List[str] = []
+    for ln in lines:
+        if not ln or _DROP_RE.search(ln) or _SINGLE_TOPIC_HEADINGS.search(ln):
+            continue
+        # Prefer concise topical lines without obvious boilerplate
+        if 3 <= len(ln.split()) <= 20 and not re.search(
+            r"\b(roll call|adjourn|call to order|channel|stream|presenter|attachments?)\b",
+            ln, re.IGNORECASE
+        ):
+            candidates.append(ln)
+
+    # Prefer lines containing strong topical keywords
+    for kw in ("budget", "zoning", "ordinance", "rate case", "hearing"):
+        for ln in candidates:
+            if re.search(kw, ln, re.IGNORECASE):
+                return ln
+    return candidates[0] if candidates else None
 
 # ------------------------------
 # PDF helpers
@@ -170,7 +225,8 @@ def _openai_bullets(text: str, *, model: str) -> Optional[List[str]]:
         "You are a newsroom assistant. Read city-meeting agenda text and extract only the most news-worthy, "
         "actionable items for journalists. Prefer motions, ordinances, spending amounts, rate/fee/tax changes, "
         "annexations/rezones, public hearing dates, contracts/grants, and official actions. "
-        "Exclude TV/ADA boilerplate, procedural items (Call to Order, minutes), attachments/exhibits, and generic headers."
+        "Exclude TV/ADA boilerplate, procedural items (Call to Order, minutes), attachments/exhibits, and generic headers. "
+        "If this agenda is a single-topic work/study/retreat, return ONE bullet with that topic only."
     )
     user_json = (
         "Return a JSON array of 6–12 short, self-contained bullets (strings). "
@@ -342,7 +398,7 @@ def _post_filter_bullets(bullets: List[str], *, limit: int = 10) -> List[str]:
     return out
 
 # ------------------------------
-# Summarize (download → extract → LLM → rules → merge → cache)
+# Summarize (download → extract → single-topic check → LLM → rules → merge → cache)
 # ------------------------------
 def _cache_path(url: str, *, max_pages: int, model: str) -> Path:
     h = hashlib.sha1(f"{url}|{max_pages}|{model}".encode("utf-8")).hexdigest()
@@ -379,6 +435,21 @@ def summarize_pdf_if_any(
     if not text:
         return []
 
+    # 0) Single-topic fast path — return ONE topical bullet
+    single = _is_single_topic_agenda(text)
+    if single:
+        result = [single]
+        try:
+            cache_fp.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+            if _DEBUG:
+                _meta_path(url, max_pages=max_pages, model=model).write_text(
+                    json.dumps({"url": url, "max_pages": max_pages, "model": model, "single_topic": True, "merged": 1}, indent=2),
+                    encoding="utf-8",
+                )
+        except Exception:
+            pass
+        return result
+
     # 1) LLM pass
     bullets_llm = _openai_bullets(text, model=model) or []
 
@@ -414,6 +485,7 @@ def summarize_pdf_if_any(
                 "url": url,
                 "max_pages": max_pages,
                 "model": model,
+                "single_topic": False,
                 "bullets_llm": len(bullets_llm),
                 "rules_raw": len(rules_raw),
                 "rules_best": len(rules_best),

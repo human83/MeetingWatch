@@ -69,7 +69,89 @@ jobs:
         run: |
           mkdir -p _site
           cp -r data _site/
-          echo "<html><body><h1>MeetingWatch Data</h1><pre>$(ls -1 data)</pre></body></html>" > _site/index.html
+
+      - name: Generate index.html from data/meetings.json
+        run: |
+          python - <<'PY'
+          import json, pathlib, html
+          from datetime import datetime
+
+          data_path = pathlib.Path('data/meetings.json')
+          out_dir   = pathlib.Path('_site')
+          out_dir.mkdir(parents=True, exist_ok=True)
+
+          try:
+              raw = json.loads(data_path.read_text(encoding='utf-8'))
+          except FileNotFoundError:
+              (out_dir/'index.html').write_text(
+                  "<h1>MeetingWatch</h1><p>No meetings.json found.</p>",
+                  encoding='utf-8'
+              )
+              raise
+
+          # meetings could be a list or wrapped under a key like 'meetings'
+          if isinstance(raw, list):
+              meetings = raw
+          else:
+              meetings = raw.get('meetings') or next(
+                  (v for v in raw.values() if isinstance(v, list)), []
+              )
+
+          def sort_key(m):
+              d = (m.get('date') or '')
+              t = m.get('start_time_local') or m.get('start_time') or ''
+              return (d, t)
+
+          meetings = sorted(meetings, key=sort_key)
+
+          # Build HTML
+          parts = []
+          parts.append('<!doctype html><meta charset="utf-8"><title>MeetingWatch</title>')
+          parts.append('''<style>
+              body{font:16px system-ui,Segoe UI,Helvetica,Arial;max-width:900px;margin:2rem auto;padding:0 1rem;}
+              h1{margin:0 0 1rem;}
+              .m{border:1px solid #e3e3e3;border-radius:12px;padding:12px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+              .meta{color:#555;font-size:.95rem}
+              ul{margin:.5rem 0 0 1.3rem}
+              a{color:#0b62d6;text-decoration:none}
+              a:hover{text-decoration:underline}
+          </style>''')
+          parts.append('<h1>MeetingWatch</h1>')
+          parts.append('<p><a href="data/meetings.json">Download meetings.json</a></p>')
+
+          for m in meetings:
+              title = html.escape(m.get('title') or m.get('name') or 'Meeting')
+              date  = html.escape(m.get('date') or '')
+              time  = html.escape(m.get('start_time_local') or m.get('start_time') or '')
+              loc   = html.escape(m.get('location') or '')
+              agenda_url = m.get('agenda_url') or m.get('agenda_pdf') or ''
+              agenda_link = f' &middot; <a href="{html.escape(agenda_url)}">agenda</a>' if agenda_url else ''
+
+              # bullets can be str or list
+              bullets = m.get('agenda_summary') or []
+              if isinstance(bullets, str):
+                  bullets = [bullets]
+              bullets = [html.escape(str(b)) for b in bullets][:8]
+
+              parts.append('<div class="m">')
+              parts.append(f'<div class="meta"><strong>{date}</strong> {time}{agenda_link}</div>')
+              parts.append(f'<h3 style="margin:.35rem 0 .4rem">{title}</h3>')
+              if loc:
+                  parts.append(f'<div class="meta">{loc}</div>')
+              if bullets:
+                  parts.append('<ul>')
+                  for b in bullets:
+                      parts.append(f'<li>{b}</li>')
+                  parts.append('</ul>')
+              parts.append('</div>')
+
+          (out_dir/'index.html').write_text('\n'.join(parts), encoding='utf-8')
+          PY
+
+      - name: List built site (debug)
+        run: |
+          echo "Built site contents:"
+          find _site -maxdepth 3 -type f -print
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3

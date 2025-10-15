@@ -158,6 +158,10 @@ _DROP_PATTERNS = [
     r"participate in this meeting should make the request as soon as",
     r"\bcity hall\b$",
     r"^criteria\.?$",
+    r"^\d{5}(?:-\d{4})?$",
+    r"^\d{1,2}:\d{2}\s?(?:AM|PM)\s*$",
+    r"^(?:[A-Za-z    r"^\d{4}-\d{2}-\d{2}$",
+]+,\s*)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s*$",
 ]
 _DROP_RE = re.compile("|".join(_DROP_PATTERNS), re.IGNORECASE)
 

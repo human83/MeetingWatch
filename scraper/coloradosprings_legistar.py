@@ -158,13 +158,13 @@ _DROP_PATTERNS = [
     r"participate in this meeting should make the request as soon as",
     r"\bcity hall\b$",
     r"^criteria\.?$",
+    # Drop date/time/zip-only crumbs
     r"^\d{5}(?:-\d{4})?$",
     r"^\d{1,2}:\d{2}\s?(?:AM|PM)\s*$",
-    r"^(?:[A-Za-z    r"^\d{4}-\d{2}-\d{2}$",
-]+,\s*)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s*$",
+    r"^(?:[A-Za-z]+,\s*)?(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},\s+\d{4}\s*$",
+    r"^\d{4}-\d{2}-\d{2}$",
 ]
 _DROP_RE = re.compile("|".join(_DROP_PATTERNS), re.IGNORECASE)
-
 def _filter_bullets(bullets: List[str], *, limit: int = BULLET_LIMIT) -> List[str]:
     """
     Keep only newsy, self-contained lines:

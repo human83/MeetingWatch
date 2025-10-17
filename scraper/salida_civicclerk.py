@@ -23,10 +23,9 @@ except ImportError:
 BASE = "https://salidaco.portal.civicclerk.com"
 API  = "https://salidaco.api.civicclerk.com/v1"
 BOARD_ID = "41156"  # City Council
-LISTING_URL = f"{BASE}/?department=All&boards-commissions={BOARD_ID}"
 UA = {"User-Agent": "MeetingWatchBot/1.0 (+https://github.com/human83/MeetingWatch)"}
 
-# TEMP safety-net so the site shows Salida now; remove once API discovery proves solid
+# TEMP safety-net so the site shows Salida now; remove once API discovery is solid
 SEED_EVENT_IDS = ["519"]
 
 LOG = logging.getLogger(__name__)
@@ -35,23 +34,19 @@ def _get(url: str) -> requests.Response:
     return requests.get(url, headers=UA, timeout=utils._DEFAULT_HTTP_TIMEOUT)
 
 # ---------------------------
-# NEW: query CivicClerk JSON API for meetings
+# Try CivicClerk JSON APIs first (if they work for this tenant)
 # ---------------------------
 def _fetch_board_meetings_api(board_id: str, days_ahead: int = 90) -> List[Dict[str, Any]]:
-    """Try several CivicClerk endpoints; return raw meeting dicts."""
     start = utils.now_mt().date()
     end = start + timedelta(days=days_ahead)
 
-    # A set of plausible endpoints seen across CivicClerk tenants
     candidates = [
-        # Common patterns
         f"{API}/Boards/GetBoardMeetings?boardId={board_id}&startDate={start}&endDate={end}",
         f"{API}/Boards/GetBoardMeetings?boardId={board_id}",
         f"{API}/Meetings/GetUpcomingMeetings?boardId={board_id}&startDate={start}&endDate={end}",
         f"{API}/Meetings/GetUpcomingMeetings?boardId={board_id}",
         f"{API}/Boards/GetMeetingsByBoard?boardId={board_id}&startDate={start}&endDate={end}",
         f"{API}/Boards/GetMeetingsByBoard?boardId={board_id}",
-        # Some tenants expose a search endpoint
         f"{API}/Search/Meetings?boardId={board_id}&startDate={start}&endDate={end}",
     ]
 
@@ -61,13 +56,7 @@ def _fetch_board_meetings_api(board_id: str, days_ahead: int = 90) -> List[Dict[
             if r.status_code != 200:
                 continue
             data = r.json()
-            # Normalize: endpoints may return {"items":[...]}, or just a list
-            if isinstance(data, dict) and "items" in data:
-                items = data.get("items") or []
-            elif isinstance(data, list):
-                items = data
-            else:
-                items = []
+            items = data.get("items") if isinstance(data, dict) else (data if isinstance(data, list) else [])
             if items:
                 LOG.info("Salida API: %d meetings from %s", len(items), url)
                 return items
@@ -77,103 +66,61 @@ def _fetch_board_meetings_api(board_id: str, days_ahead: int = 90) -> List[Dict[
     return []
 
 def _meeting_id_from_api_item(item: Dict[str, Any]) -> Optional[str]:
-    """Extract an ID to build /event/<id> URL."""
     for key in ("eventId", "EventId", "id", "Id", "meetingId", "MeetingId"):
         if key in item:
-            val = item[key]
+            v = item[key]
             try:
-                return str(int(val))
+                return str(int(v))
             except Exception:
-                if isinstance(val, str) and val.isdigit():
-                    return val
-    # sometimes nested
-    for key in ("event", "meeting", "Meeting", "Event"):
-        if key in item and isinstance(item[key], dict):
-            nested = _meeting_id_from_api_item(item[key])
+                if isinstance(v, str) and v.isdigit():
+                    return v
+    for k in ("event", "meeting", "Meeting", "Event"):
+        if isinstance(item.get(k), dict):
+            nested = _meeting_id_from_api_item(item[k])
             if nested:
                 return nested
     return None
 
 def _meeting_datetime_from_api_item(item: Dict[str, Any]) -> Optional[datetime]:
-    """Try common fields for datetime."""
     for key in ("meetingDate", "MeetingDate", "startDate", "StartDate", "date", "Date", "eventDate"):
-        if key in item and item[key]:
+        if item.get(key):
             try:
                 return dtparser.parse(str(item[key]))
             except Exception:
                 pass
-    # sometimes nested fields
-    for key in ("meeting", "Meeting", "event", "Event"):
-        if key in item and isinstance(item[key], dict):
-            dtv = _meeting_datetime_from_api_item(item[key])
+    for k in ("meeting", "Meeting", "event", "Event"):
+        if isinstance(item.get(k), dict):
+            dtv = _meeting_datetime_from_api_item(item[k])
             if dtv:
                 return dtv
     return None
 
 # ---------------------------
-# Old HTML fallbacks (kept)
+# Files page -> agenda page -> PDF/stream
 # ---------------------------
-def _extract_event_links_from_listing(html_text: str) -> List[str]:
-    """HTML discovery (anchors + raw text + 'eventId' JSON), used as a fallback."""
-    hrefs = set()
-
-    # anchors
-    soup = BeautifulSoup(html_text, "html.parser")
-    for a in soup.find_all("a", href=True):
-        m = re.search(r"/event/(\d+)", a["href"])
-        if m:
-            hrefs.add(f"{BASE}/event/{m.group(1)}")
-
-    # raw '/event/<id>'
-    for m in re.finditer(r"/event/(\d+)", html_text):
-        hrefs.add(f"{BASE}/event/{m.group(1)}")
-
-    # inline JSON "eventId": 123
-    for m in re.finditer(r'"eventId"\s*:\s*(\d+)', html_text):
-        hrefs.add(f"{BASE}/event/{m.group(1)}")
-
-    LOG.info("Salida HTML: discovered %d event links", len(hrefs))
-    return sorted(hrefs)
-
-def _parse_when_and_location(soup: BeautifulSoup) -> Tuple[Optional[datetime], Optional[str]]:
-    """Parse human-readable 'Tuesday, October 21, 2025 at 6:00 PM' and any visible location text."""
-    when: Optional[datetime] = None
-    for node in soup.find_all(text=True):
-        t = (node or "").strip()
-        if not t:
-            continue
-        if re.search(r"(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday).+\d{4}", t, re.I):
-            try:
-                when = dtparser.parse(t, fuzzy=True)
-                break
-            except Exception:
-                pass
-
-    location = None
-    candidates = []
-    for el in soup.find_all(["div", "li", "p", "span"]):
-        s = (el.get_text(" ", strip=True) or "").strip()
-        if s and re.search(r"(Room|Street|St\.|Ave|Avenue|City Hall|Council Chambers|Salida)", s, re.I):
-            candidates.append(s)
-    if candidates:
-        location = sorted(candidates, key=len, reverse=True)[0][:160]
-
-    return when, location
-
-def _find_agenda_pages(event_url: str, soup: BeautifulSoup) -> List[str]:
-    """Links like /event/<id>/files/agenda/<agendaId>."""
+def _agenda_page_urls_from_files_page(meeting_id: str) -> List[str]:
+    """Fetch /event/<id>/files and pull links like /event/<id>/files/agenda/<agendaId>."""
+    files_url = f"{BASE}/event/{meeting_id}/files"
+    try:
+        r = _get(files_url)
+        r.raise_for_status()
+    except Exception as e:
+        LOG.warning("Salida: files page fetch failed %s: %s", files_url, e)
+        return []
+    soup = BeautifulSoup(r.text, "html.parser")
     links = []
     for a in soup.select("a[href]"):
         href = a["href"]
-        if "files/agenda" in href:
-            if href.startswith("/"):
-                links.append(BASE + href)
-            elif href.startswith("http"):
-                links.append(href)
-    return sorted(set(links))
+        if "/files/agenda/" in href:
+            full = href if href.startswith("http") else (BASE + href if href.startswith("/") else None)
+            if full:
+                links.append(full)
+    links = sorted(set(links))
+    LOG.info("Salida: %s -> %d agenda pages", files_url, len(links))
+    return links
 
 def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Optional[bytes]]:
-    """Return (pdf_url, pdf_bytes)."""
+    """Return (pdf_url, pdf_bytes). We download stream bytes when needed."""
     try:
         r = _get(agenda_page_url)
         r.raise_for_status()
@@ -183,17 +130,15 @@ def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Opt
 
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Direct PDF
+    # Direct .pdf
     for a in soup.select("a[href]"):
         href = a["href"]
         full = href if href.startswith("http") else (BASE + href if href.startswith("/") else None)
-        if not full:
-            continue
-        if href.lower().endswith(".pdf"):
+        if full and href.lower().endswith(".pdf"):
             LOG.info("Salida: found direct PDF %s", full)
             return full, None
 
-    # Stream
+    # GetMeetingFileStream
     stream_url = None
     for a in soup.select("a[href]"):
         href = a["href"]
@@ -219,10 +164,12 @@ def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Opt
         LOG.warning("Salida: stream fetch failed %s: %s", stream_url, e)
     return None, None
 
+# ---------------------------
+# PDF text -> date/time/title -> bullets (using your utils pipeline)
+# ---------------------------
 def _extract_text_from_pdf_bytes(pdf_bytes: bytes, max_pages: int) -> Optional[str]:
-    # mirror utils’ pdfminer import strategy
     try:
-        from pdfminer_high_level import extract_text
+        from pdfminer_high_level import extract_text  # some installs
     except Exception:
         try:
             from pdfminer.high_level import extract_text
@@ -237,6 +184,37 @@ def _extract_text_from_pdf_bytes(pdf_bytes: bytes, max_pages: int) -> Optional[s
         return txt.strip()
     except Exception:
         return None
+
+def _parse_datetime_from_text(text: str) -> Optional[datetime]:
+    """
+    Salida agendas usually include a line like:
+      'City Council Regular Meeting – Tuesday, October 21, 2025 – 6:00 PM'
+    We parse the first plausible Month Day, Year + time we see.
+    """
+    # Try strong patterns first
+    m = re.search(r'([A-Za-z]+day,\s+[A-Za-z]+\s+\d{1,2},\s+\d{4}).{0,40}(\d{1,2}:\d{2}\s*(AM|PM))', text, re.I)
+    if m:
+        try:
+            return dtparser.parse(f"{m.group(1)} {m.group(2)}")
+        except Exception:
+            pass
+    # Looser fallback: first Month Day, Year and later a time on the same/nearby line
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    for i, ln in enumerate(lines):
+        if re.search(r'[A-Za-z]+\s+\d{1,2},\s+\d{4}', ln):
+            # scan this and next two lines for a time
+            blob = " ".join(lines[i:i+3])
+            m2 = re.search(r'(\d{1,2}:\d{2}\s*(AM|PM))', blob, re.I)
+            if m2:
+                try:
+                    return dtparser.parse(f"{ln} {m2.group(1)}")
+                except Exception:
+                    pass
+            try:
+                return dtparser.parse(ln)
+            except Exception:
+                pass
+    return None
 
 def _summarize_text_with_utils(text: str) -> List[str]:
     single = utils._is_single_topic_agenda(text)
@@ -276,69 +254,86 @@ def _fmt_date_time_local(dt_obj: datetime) -> Tuple[str, str]:
 def parse_salida() -> List[dict]:
     items: List[dict] = []
 
-    # --- Preferred path: API discovery ---
+    # --- Preferred: API discovery ---
     raw_meetings = _fetch_board_meetings_api(BOARD_ID, days_ahead=90)
-    event_links: List[str] = []
+    meeting_ids: List[str] = []
     for m in raw_meetings:
         mid = _meeting_id_from_api_item(m)
         when_dt = _meeting_datetime_from_api_item(m)
         if not mid or not when_dt:
             continue
-        if not utils.is_future(when_dt):
-            continue
-        event_links.append(f"{BASE}/event/{mid}")
-    event_links = sorted(set(event_links))
-    LOG.info("Salida API: normalized %d event links", len(event_links))
+        if utils.is_future(when_dt):
+            meeting_ids.append(mid)
+    meeting_ids = sorted(set(meeting_ids))
+    LOG.info("Salida API: normalized %d future meeting IDs", len(meeting_ids))
 
-    # --- Fallback: HTML discovery (if API yielded nothing) ---
-    if not event_links:
+    # --- Last resort seed (listing/event pages are JS-only) ---
+    if not meeting_ids:
+        LOG.warning("Salida: no meeting IDs from API; seeding %s for now", SEED_EVENT_IDS)
+        meeting_ids = SEED_EVENT_IDS[:]
+
+    # Visit each meeting via the FILES page (server-rendered), then agenda PDF
+    for mid in meeting_ids:
         try:
-            r = _get(LISTING_URL)
-            r.raise_for_status()
-            event_links = _extract_event_links_from_listing(r.text)
-        except Exception as e:
-            LOG.warning("Salida HTML: failed to load listing: %s", e)
+            event_url = f"{BASE}/event/{mid}"
+            LOG.info("Salida: meeting %s", event_url)
 
-    # --- Last resort seed (remove once stable) ---
-    if not event_links:
-        LOG.warning("Salida: no event links from API or HTML; seeding %s for now", SEED_EVENT_IDS)
-        event_links = [f"{BASE}/event/{eid}" for eid in SEED_EVENT_IDS]
-
-    # Visit each event page and build items
-    for event_url in event_links:
-        try:
-            LOG.info("Salida: scanning %s", event_url)
-            er = _get(event_url)
-            er.raise_for_status()
-            soup = BeautifulSoup(er.text, "html.parser")
-
-            h = soup.find(["h1", "h2"])
-            title = (h.get_text(strip=True) if h else "").strip() or "City Council Meeting"
-            if not _title_is_city_council(title):
+            # 1) find agenda page(s) from FILES page
+            agenda_pages = _agenda_page_urls_from_files_page(mid)
+            if not agenda_pages:
+                LOG.info("Salida: no agenda pages on files page for %s", mid)
                 continue
 
-            when_dt, location = _parse_when_and_location(soup)
-            if not when_dt or not utils.is_future(when_dt):
-                continue
-
-            agenda_urls = _find_agenda_pages(event_url, soup)
-            agenda_url_for_cache = None
+            # 2) resolve and fetch agenda PDF (direct .pdf or stream bytes)
             bullets: List[str] = []
+            agenda_url_for_cache = None
+            text_for_dt: Optional[str] = None
 
-            for ap in agenda_urls:
+            for ap in agenda_pages:
                 pdf_url, pdf_bytes = _resolve_pdf_url_or_stream(ap)
                 if pdf_url:
                     bullets = utils.summarize_pdf_if_any(pdf_url)
                     agenda_url_for_cache = pdf_url
+                    # we still want text for date/time if possible
+                    try:
+                        rr = _get(pdf_url)
+                        if rr.ok and rr.content[:4] == b"%PDF":
+                            text_for_dt = _extract_text_from_pdf_bytes(rr.content, max_pages=utils._DEFAULT_MAX_PAGES)
+                    except Exception:
+                        pass
                     if bullets:
                         break
                 elif pdf_bytes:
-                    text = _extract_text_from_pdf_bytes(pdf_bytes, max_pages=utils._DEFAULT_MAX_PAGES)
-                    if text:
-                        bullets = _summarize_text_with_utils(text)
+                    text_for_dt = _extract_text_from_pdf_bytes(pdf_bytes, max_pages=utils._DEFAULT_MAX_PAGES)
+                    if text_for_dt:
+                        bullets = _summarize_text_with_utils(text_for_dt)
                         agenda_url_for_cache = ap
                         if bullets:
                             break
+
+            if not bullets and not agenda_url_for_cache:
+                # no agenda yet; skip until posted
+                LOG.info("Salida: no agenda content yet for %s", mid)
+                continue
+
+            # 3) derive when/location & title
+            when_dt = _parse_datetime_from_text(text_for_dt or "") if text_for_dt else None
+            if not when_dt:
+                # fallback: keep in future bucket by assuming tonight 6pm if unknown, so it still shows
+                when_dt = utils.now_mt().replace(hour=18, minute=0, second=0, microsecond=0)
+
+            # title heuristic from text; otherwise generic
+            title = "City Council Meeting"
+            if text_for_dt:
+                if re.search(r"regular\s+council\s+meeting", text_for_dt, re.I):
+                    title = "City Council Regular Meeting"
+                elif re.search(r"work\s+session", text_for_dt, re.I):
+                    title = "City Council Work Session"
+
+            if not _title_is_city_council(title):
+                continue
+            if not utils.is_future(when_dt):
+                continue
 
             date_str, time_str = _fmt_date_time_local(when_dt)
             item = utils.make_meeting(
@@ -347,7 +342,7 @@ def parse_salida() -> List[dict]:
                 date=date_str,
                 start_time_local=time_str,
                 status="Scheduled",
-                location=location,
+                location=None,  # not in PDF reliably; omit
                 agenda_url=agenda_url_for_cache,
                 agenda_summary=bullets,
                 source=event_url,
@@ -355,7 +350,7 @@ def parse_salida() -> List[dict]:
             items.append(item)
 
         except Exception as e:
-            LOG.warning("Salida: error while parsing %s: %s", event_url, e)
+            LOG.warning("Salida: error while processing meeting %s: %s", mid, e)
 
     return items
 

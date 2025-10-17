@@ -63,7 +63,7 @@ _DEFAULT_MAX_CHARS = int(os.getenv("PDF_SUMMARY_MAX_CHARS", "72000"))
 _DEFAULT_HTTP_TIMEOUT = float(os.getenv("HTTP_TIMEOUT_SEC", "32"))
 _DEFAULT_REQ_TIMEOUT = float(os.getenv("PDF_HTTP_TIMEOUT_SEC", str(_DEFAULT_HTTP_TIMEOUT)))
 _DEFAULT_MODEL = os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini")
-_MAX_BULLETS = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "12"))
+_MAX_BULLETS = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "20"))
 _DISABLE_SUMMARIZER = os.getenv("SUMMARIZER_DISABLE", "").strip() == "1"
 _SUMMARIZER_STRICT = os.getenv("SUMMARIZER_STRICT", "").strip() == "1"
 _DEBUG = os.getenv("PDF_SUMMARY_DEBUG", "").strip() == "1"

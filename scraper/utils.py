@@ -229,11 +229,11 @@ def _openai_bullets(text: str, *, model: str) -> Optional[List[str]]:
         "If this agenda is a single-topic work/study/retreat, return ONE bullet with that topic only."
     )
     user_json = (
-        "Return a JSON array of 6–12 short, self-contained bullets (strings). "
+        "Return a JSON array of 6–20 short, self-contained bullets (strings). "
         "AGENDA TEXT BEGIN\n" + t + "\nAGENDA TEXT END\nReturn ONLY JSON."
     )
     user_bullets = (
-        "If you cannot produce valid JSON, return 6–12 bullets, one per line, "
+        "If you cannot produce valid JSON, return 6–20 bullets, one per line, "
         "each prefixed with '- '. AGENDA TEXT BEGIN\n" + t + "\nAGENDA TEXT END\nDo not include any other text."
     )
 

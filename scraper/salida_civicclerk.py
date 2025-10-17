@@ -1,4 +1,4 @@
-# scraper/salidaco_civicclerk.py
+# scraper/salida_civicclerk.py
 from __future__ import annotations
 
 import re
@@ -25,6 +25,9 @@ BOARD_ID = "41156"  # City Council
 LISTING_URL = f"{BASE}/?department=All&boards-commissions={BOARD_ID}"
 UA = {"User-Agent": "MeetingWatchBot/1.0 (+https://github.com/human83/MeetingWatch)"}
 
+# TEMP safety-net so the site shows Salida now; remove once discovery is solid
+SEED_EVENT_IDS = ["519"]
+
 LOG = logging.getLogger(__name__)
 
 def _get(url: str) -> requests.Response:
@@ -32,7 +35,10 @@ def _get(url: str) -> requests.Response:
 
 def _extract_event_links(html_text: str) -> List[str]:
     """
-    Find /event/<id> links by BOTH DOM anchors and raw-text scanning (handles React/JS portals).
+    Robust event discovery for CivicClerk React/JS portals.
+    1) DOM anchors
+    2) Raw-text regex for '/event/<id>'
+    3) Raw-text regex for JSON keys like "eventId": <id>
     """
     hrefs = set()
 
@@ -43,8 +49,12 @@ def _extract_event_links(html_text: str) -> List[str]:
         if m:
             hrefs.add(f"{BASE}/event/{m.group(1)}")
 
-    # 2) Raw text scan catches inline JSON/state blobs
-    for m in re.finditer(r'\/event\/(\d+)', html_text):
+    # 2) Raw text scan catches inline JSON/state blobs: '/event/<id>'
+    for m in re.finditer(r"/event/(\d+)", html_text):
+        hrefs.add(f"{BASE}/event/{m.group(1)}")
+
+    # 3) Inline JSON "eventId": 123
+    for m in re.finditer(r'"eventId"\s*:\s*(\d+)', html_text):
         hrefs.add(f"{BASE}/event/{m.group(1)}")
 
     LOG.info("Salida: discovered %d event links", len(hrefs))
@@ -228,9 +238,8 @@ def parse_salida() -> List[dict]:
 
     event_links = _extract_event_links(r.text)
     if not event_links:
-        LOG.warning("Salida: no event links found on listing (JS may obscure them).")
-        # Optional: seed fallback if needed during initial bring-up (remove once discovery is solid)
-        # event_links = [f"{BASE}/event/519"]
+        LOG.warning("Salida: no event links found on listing; seeding %s for now", SEED_EVENT_IDS)
+        event_links = [f"{BASE}/event/{eid}" for eid in SEED_EVENT_IDS]
 
     # 2) Visit each event, filter upcoming City Council
     for event_url in sorted(set(event_links)):

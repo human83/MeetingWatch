@@ -224,7 +224,7 @@ def _openai_bullets(text: str, *, model: str) -> Optional[List[str]]:
     system = (
         "You are a newsroom assistant. Read city-meeting agenda text and extract only the most news-worthy, "
         "actionable items for journalists. Prefer motions, ordinances, spending amounts, rate/fee/tax changes, "
-        "annexations/rezones, public hearing dates, contracts/grants, and official actions. "
+        "annexations/rezones, public hearing dates, requests, contracts/grants, and official actions. "
         "Exclude TV/ADA boilerplate, procedural items (Call to Order, minutes), attachments/exhibits, and generic headers. "
         "If this agenda is a single-topic work/study/retreat, return ONE bullet with that topic only."
     )

@@ -31,16 +31,23 @@ def _get(url: str) -> requests.Response:
     return requests.get(url, headers=UA, timeout=utils._DEFAULT_HTTP_TIMEOUT)
 
 def _extract_event_links(html_text: str) -> List[str]:
-    """CivicClerk main page is JS, but it still renders /event/<id> anchors in HTML."""
-    soup = BeautifulSoup(html_text, "html.parser")
+    """
+    Find /event/<id> links by BOTH DOM anchors and raw-text scanning (handles React/JS portals).
+    """
     hrefs = set()
-    for a in soup.select("a[href]"):
-        href = a["href"]
-        if re.search(r"/event/\d+/?($|[#?/])", href):
-            if href.startswith("/"):
-                hrefs.add(BASE + href)
-            elif href.startswith("http"):
-                hrefs.add(href)
+
+    # 1) DOM anchors (when present)
+    soup = BeautifulSoup(html_text, "html.parser")
+    for a in soup.find_all("a", href=True):
+        m = re.search(r"/event/(\d+)", a["href"])
+        if m:
+            hrefs.add(f"{BASE}/event/{m.group(1)}")
+
+    # 2) Raw text scan catches inline JSON/state blobs
+    for m in re.finditer(r'\/event\/(\d+)', html_text):
+        hrefs.add(f"{BASE}/event/{m.group(1)}")
+
+    LOG.info("Salida: discovered %d event links", len(hrefs))
     return sorted(hrefs)
 
 def _parse_when_and_location(soup: BeautifulSoup) -> Tuple[Optional[datetime], Optional[str]]:
@@ -66,7 +73,6 @@ def _parse_when_and_location(soup: BeautifulSoup) -> Tuple[Optional[datetime], O
         if s and re.search(r"(Room|Street|St\.|Ave|Avenue|City Hall|Council Chambers|Salida)", s, re.I):
             candidates.append(s)
     if candidates:
-        # pick the longest plausible string
         location = sorted(candidates, key=len, reverse=True)[0][:160]
 
     return when, location
@@ -93,7 +99,7 @@ def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Opt
         r = _get(agenda_page_url)
         r.raise_for_status()
     except Exception as e:
-        LOG.warning("agenda page fetch failed %s: %s", agenda_page_url, e)
+        LOG.warning("Salida: agenda page fetch failed %s: %s", agenda_page_url, e)
         return None, None
 
     soup = BeautifulSoup(r.text, "html.parser")
@@ -105,6 +111,7 @@ def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Opt
         if not full:
             continue
         if href.lower().endswith(".pdf"):
+            LOG.info("Salida: found direct PDF %s", full)
             return full, None
 
     # Look for CivicClerk stream endpoints
@@ -116,7 +123,6 @@ def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Opt
             break
 
     if not stream_url:
-        # some portals store file id on data attributes
         btn = soup.select_one("[data-file-id]")
         if btn and btn.get("data-file-id", "").isdigit():
             file_id = btn["data-file-id"]
@@ -125,15 +131,16 @@ def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Opt
     if not stream_url:
         return None, None
 
-    # Download bytes (header may be octet-stream, so utils.summarize_pdf_if_any(url) would skip)
+    # Download bytes (header may be octet-stream; we handle bytes ourselves)
     try:
         rr = _get(stream_url)
         rr.raise_for_status()
         content = rr.content
         if content and content[:4] == b"%PDF":
+            LOG.info("Salida: fetched PDF bytes from stream %s", stream_url)
             return None, content
     except Exception as e:
-        LOG.warning("stream fetch failed %s: %s", stream_url, e)
+        LOG.warning("Salida: stream fetch failed %s: %s", stream_url, e)
 
     return None, None
 
@@ -168,7 +175,7 @@ def _summarize_text_with_utils(text: str) -> List[str]:
     if single:
         return [utils.clean_text(single)]
 
-    # LLM
+    # LLM path
     model = utils._DEFAULT_MODEL
     bullets_llm = utils._openai_bullets(text, model=model) or []
 
@@ -176,7 +183,7 @@ def _summarize_text_with_utils(text: str) -> List[str]:
     rules_raw = utils._legistar_rule_based_bullets(text, limit=max(36, utils._MAX_BULLETS * 3))
     rules_best = utils._post_filter_bullets(rules_raw, limit=max(24, utils._MAX_BULLETS * 2))
 
-    # Merge with your precedence and limits
+    # Merge with precedence + limits
     merged: List[str] = []
     seen = set()
     for src in (bullets_llm, rules_best):
@@ -198,7 +205,9 @@ def _summarize_text_with_utils(text: str) -> List[str]:
 
 def _title_is_city_council(title: str) -> bool:
     t = (title or "").lower()
-    return "council" in t  # optional: and "work session" not in t
+    # Allow “City Council”, “Council Meeting”, etc. Exclude unrelated councils if any.
+    return ("council" in t) and not ("youth council" in t or "advisory council" in t)
+    # If you want to exclude Work Sessions, add: and ("work session" not in t)
 
 def _fmt_date_time_local(dt_obj: datetime) -> Tuple[str, str]:
     dt_mt = utils.to_mt(dt_obj)
@@ -214,17 +223,19 @@ def parse_salida() -> List[dict]:
         r = _get(LISTING_URL)
         r.raise_for_status()
     except Exception as e:
-        LOG.error("Failed to load listing: %s", e)
+        LOG.error("Salida: failed to load listing: %s", e)
         return items
 
     event_links = _extract_event_links(r.text)
     if not event_links:
-        LOG.info("No event links found on listing (JS may obscure them).")
-        return items
+        LOG.warning("Salida: no event links found on listing (JS may obscure them).")
+        # Optional: seed fallback if needed during initial bring-up (remove once discovery is solid)
+        # event_links = [f"{BASE}/event/519"]
 
     # 2) Visit each event, filter upcoming City Council
     for event_url in sorted(set(event_links)):
         try:
+            LOG.info("Salida: scanning %s", event_url)
             er = _get(event_url)
             er.raise_for_status()
             soup = BeautifulSoup(er.text, "html.parser")
@@ -282,7 +293,7 @@ def parse_salida() -> List[dict]:
             items.append(item)
 
         except Exception as e:
-            LOG.warning("Error while parsing %s: %s", event_url, e)
+            LOG.warning("Salida: error while parsing %s: %s", event_url, e)
 
     return items
 

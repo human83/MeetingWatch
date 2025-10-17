@@ -1,84 +1,32 @@
-# Salida CivicClerk board endpoint; fetch upcoming City Council meetings and summarize agenda PDFs.
-# Supports CivicClerk "files/agenda/<id>" pages and direct file streams.
-#
-# Returns: list[dict] with keys:
-#   - title (str)
-#   - when (datetime ISO string)
-#   - source (str)  # full URL to the meeting page (users asked to see it)
-#   - bullets (list[str])  # "newsworthy" bullets from agenda PDF
-#
-# This module expects a summarizer function in utils.py. It will try, in order:
-#   utils.summarize_pdf_bytes(pdf_bytes, *, city, max_bullets)
-#   utils.summarize_pdf(pdf_path_or_bytes, *, city, max_bullets)
-#   utils.extract_news_bullets(text, *, city, max_bullets)  # fallback if no PDF found
-#
-# If none exist, it will still return items with an empty bullets list so the site can render something.
-
+# scraper/salidaco_civicclerk.py
 from __future__ import annotations
+
 import re
 import io
 import json
-import time
-import math
-import html
 import logging
-import datetime as dt
-from typing import List, Dict, Optional, Tuple
+from typing import List, Optional, Tuple
+from datetime import datetime
 
 import requests
 from bs4 import BeautifulSoup
-from dateutil import parser as dtparser, tz
+from dateutil import parser as dtparser
 
-# --- Config ---
+# Reuse your utils (timezone, future filter, meeting factory, summarizers)
+import utils
+
 BASE = "https://salidaco.portal.civicclerk.com"
 BOARD_ID = "41156"  # City Council
 LISTING_URL = f"{BASE}/?department=All&boards-commissions={BOARD_ID}"
-USER_AGENT = "MeetingWatchBot/1.0 (+https://github.com/human83/MeetingWatch)"
-TIMEZONE = tz.gettz("America/Denver")  # Salida, CO local
+UA = {"User-Agent": "MeetingWatchBot/1.0 (+https://github.com/human83/MeetingWatch)"}
 
-# How far ahead to look for "upcoming"
-LOOKAHEAD_DAYS = 60
-
-# --- Utilities to integrate with your repo's summarizer(s) ---
-def _import_summarizers():
-    """
-    Probe utils.py for whichever summarizer you wired.
-    We don't know your exact function name, so try a few common ones.
-    """
-    try:
-        import utils  # your repo's helper module
-    except Exception:
-        return None, None, None
-
-    summarize_pdf_bytes = getattr(utils, "summarize_pdf_bytes", None)
-    summarize_pdf = getattr(utils, "summarize_pdf", None)
-    extract_news_bullets = getattr(utils, "extract_news_bullets", None)
-    return summarize_pdf_bytes, summarize_pdf, extract_news_bullets
-
-
-def _now_local():
-    return dt.datetime.now(tz=TIMEZONE)
-
-
-def _iso(dt_obj: dt.datetime) -> str:
-    return dt_obj.astimezone(TIMEZONE).isoformat()
-
+LOG = logging.getLogger(__name__)
 
 def _get(url: str) -> requests.Response:
-    return requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=30)
+    return requests.get(url, headers=UA, timeout=utils._DEFAULT_HTTP_TIMEOUT)
 
-
-def _is_future(meeting_dt: dt.datetime) -> bool:
-    now = _now_local()
-    # same-day at/after now counts as "upcoming" for our purposes
-    return meeting_dt >= now.replace(hour=0, minute=0, second=0, microsecond=0)
-
-
-def _extract_event_links_from_listing(html_text: str) -> List[str]:
-    """
-    The main listing is a JS app, but the server still renders anchor tags to /event/<id>.
-    Grab unique event links.
-    """
+def _extract_event_links(html_text: str) -> List[str]:
+    """CivicClerk main page is JS, but it still renders /event/<id> anchors in HTML."""
     soup = BeautifulSoup(html_text, "html.parser")
     hrefs = set()
     for a in soup.select("a[href]"):
@@ -90,45 +38,36 @@ def _extract_event_links_from_listing(html_text: str) -> List[str]:
                 hrefs.add(href)
     return sorted(hrefs)
 
-
-def _parse_event_datetime_from_event_page(soup: BeautifulSoup) -> Optional[dt.datetime]:
-    """
-    CivicClerk event pages show a human date like: 'Tuesday, October 21, 2025 at 6:00 PM'
-    Try to find and parse it.
-    """
-    # Common spots: h1/h2 headers and detail rows
-    candidates = []
-    for el in soup.find_all(text=True):
-        t = (el or "").strip()
+def _parse_when_and_location(soup: BeautifulSoup) -> Tuple[Optional[datetime], Optional[str]]:
+    """Parse human-readable 'Tuesday, October 21, 2025 at 6:00 PM' and any visible location text."""
+    # Datetime: scan text nodes for a weekday + year phrase and parse
+    when: Optional[datetime] = None
+    for node in soup.find_all(text=True):
+        t = (node or "").strip()
         if not t:
             continue
-        # very permissive: look for a weekday + month pattern
         if re.search(r"(Sunday|Monday|Tuesday|Wednesday|Thursday|Friday|Saturday).+\d{4}", t, re.I):
-            candidates.append(t)
+            try:
+                when = dtparser.parse(t, fuzzy=True)
+                break
+            except Exception:
+                pass
 
-    # Try parsing best-first
-    for t in candidates:
-        try:
-            d = dtparser.parse(t, fuzzy=True).astimezone(TIMEZONE)
-            return d
-        except Exception:
-            continue
+    # Location: look for labels that often show the room/address
+    location = None
+    candidates = []
+    for el in soup.find_all(["div", "li", "p", "span"]):
+        s = (el.get_text(" ", strip=True) or "").strip()
+        if s and re.search(r"(Room|Street|St\.|Ave|Avenue|City Hall|Council Chambers|Salida)", s, re.I):
+            candidates.append(s)
+    if candidates:
+        # pick the longest plausible string
+        location = sorted(candidates, key=len, reverse=True)[0][:160]
 
-    # Fallback: look for ISO in data attributes
-    for tag in soup.find_all(attrs=True):
-        for k, v in tag.attrs.items():
-            if isinstance(v, str) and re.search(r"\d{4}-\d{2}-\d{2}T", v):
-                try:
-                    return dtparser.parse(v).astimezone(TIMEZONE)
-                except Exception:
-                    pass
-    return None
-
+    return when, location
 
 def _find_agenda_pages(event_url: str, soup: BeautifulSoup) -> List[str]:
-    """
-    Locate links like /event/<id>/files/agenda/<agendaId> from the event page.
-    """
+    """Links like /event/<id>/files/agenda/<agendaId>."""
     links = []
     for a in soup.select("a[href]"):
         href = a["href"]
@@ -136,169 +75,212 @@ def _find_agenda_pages(event_url: str, soup: BeautifulSoup) -> List[str]:
             if href.startswith("/"):
                 links.append(BASE + href)
             elif href.startswith("http"):
-                # ensure same host; if not, still keep
                 links.append(href)
     return sorted(set(links))
 
+def _resolve_pdf_url_or_stream(agenda_page_url: str) -> Tuple[Optional[str], Optional[bytes]]:
+    """
+    Return (pdf_url, pdf_bytes). One of them may be None.
+    - If a .pdf link with correct headers exists → (url, None)
+    - If only a stream (GetMeetingFileStream) is present → (None, bytes)
+    """
+    try:
+        r = _get(agenda_page_url)
+        r.raise_for_status()
+    except Exception as e:
+        LOG.warning("agenda page fetch failed %s: %s", agenda_page_url, e)
+        return None, None
 
-def _extract_pdf_or_stream(url: str) -> Tuple[Optional[bytes], Optional[str]]:
-    """
-    For an agenda page (files/agenda/ID), try to get a PDF:
-      - direct .pdf link(s)
-      - CivicClerk file stream like .../v1/Meetings/GetMeetingFileStream(fileId=####,plainText=false)
-    Returns (pdf_bytes, source_pdf_url or stream_url)
-    """
-    r = _get(url)
-    r.raise_for_status()
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # direct PDF <a>
+    # Try direct PDF links first
     for a in soup.select("a[href]"):
         href = a["href"]
-        if href.lower().endswith(".pdf") or "GetMeetingFileStream" in href:
-            full = href
-            if href.startswith("/"):
-                full = BASE + href
-            try:
-                # Some portals embed pdfjs viewer around the actual stream URL; unwrap if needed
-                if "file=" in full and "pdfjs" in full:
-                    from urllib.parse import parse_qs, urlparse, unquote
-                    qs = parse_qs(urlparse(full).query)
-                    inner = qs.get("file", [None])[0]
-                    if inner:
-                        full = unquote(inner)
+        full = href if href.startswith("http") else (BASE + href if href.startswith("/") else None)
+        if not full:
+            continue
+        if href.lower().endswith(".pdf"):
+            return full, None
 
-                rr = _get(full)
-                rr.raise_for_status()
-                if rr.headers.get("content-type", "").lower().startswith("application/pdf") or rr.content.startswith(b"%PDF"):
-                    return rr.content, full
-                # Some streams return octet-stream but are still PDFs
-                if rr.content[:4] == b"%PDF":
-                    return rr.content, full
-            except Exception:
-                continue
+    # Look for CivicClerk stream endpoints
+    stream_url = None
+    for a in soup.select("a[href]"):
+        href = a["href"]
+        if "GetMeetingFileStream" in href:
+            stream_url = href if href.startswith("http") else BASE + href
+            break
 
-    # Sometimes the page has buttons with data-file-id
-    for btn in soup.select("[data-file-id]"):
-        file_id = btn.get("data-file-id")
-        if file_id and file_id.isdigit():
-            # Construct a typical file-stream URL (works across CivicClerk tenants)
-            stream = f"https://salidaco.api.civicclerk.com/v1/Meetings/GetMeetingFileStream(fileId={file_id},plainText=false)"
-            try:
-                rr = _get(stream)
-                rr.raise_for_status()
-                if rr.content[:4] == b"%PDF":
-                    return rr.content, stream
-            except Exception:
-                pass
+    if not stream_url:
+        # some portals store file id on data attributes
+        btn = soup.select_one("[data-file-id]")
+        if btn and btn.get("data-file-id", "").isdigit():
+            file_id = btn["data-file-id"]
+            stream_url = f"https://salidaco.api.civicclerk.com/v1/Meetings/GetMeetingFileStream(fileId={file_id},plainText=false)"
+
+    if not stream_url:
+        return None, None
+
+    # Download bytes (header may be octet-stream, so utils.summarize_pdf_if_any(url) would skip)
+    try:
+        rr = _get(stream_url)
+        rr.raise_for_status()
+        content = rr.content
+        if content and content[:4] == b"%PDF":
+            return None, content
+    except Exception as e:
+        LOG.warning("stream fetch failed %s: %s", stream_url, e)
 
     return None, None
 
-
-def _summarize_pdf_bytes(pdf_bytes: bytes, *, city: str, max_bullets: int = 12) -> List[str]:
-    summarize_pdf_bytes, summarize_pdf, extract_news_bullets = _import_summarizers()
-
-    # 1) Prefer a byte-oriented summarizer if your utils exposes it
-    if callable(summarize_pdf_bytes):
-        try:
-            return summarize_pdf_bytes(pdf_bytes, city=city, max_bullets=max_bullets)
-        except Exception as e:
-            logging.warning("summarize_pdf_bytes failed: %s", e)
-
-    # 2) Some repos expose summarize_pdf that can accept bytes or a path
-    if callable(summarize_pdf):
-        try:
-            return summarize_pdf(pdf_bytes, city=city, max_bullets=max_bullets)  # many helpers accept bytes too
-        except Exception as e:
-            logging.warning("summarize_pdf failed: %s", e)
-
-    # 3) Fallback: crude extraction (no PDF OCR here; we defer to your utils in real runs)
+def _extract_text_from_pdf_bytes(pdf_bytes: bytes, max_pages: int) -> Optional[str]:
+    # mirror utils’ pdfminer import strategy
     try:
-        import pdfminer.high_level as pdfminer_high
-        text = pdfminer_high.extract_text(io.BytesIO(pdf_bytes)) or ""
-        if callable(extract_news_bullets):
-            return extract_news_bullets(text, city=city, max_bullets=max_bullets)
-        # naive fallback: first 10 non-empty lines as bullets
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        return [f"- {ln}" for ln in lines[: min(max_bullets, 12)]]
+        from pdfminer_high_level import extract_text  # some installs
     except Exception:
-        return []
-
-
-def parse_salida() -> List[Dict]:
-    """
-    Main entry: discover upcoming Salida City Council meetings and return summarized bullets.
-    """
-    items: List[Dict] = []
-
-    # 1) Load listing (City Council board filtered)
+        try:
+            from pdfminer.high_level import extract_text  # pdfminer.six typical
+        except Exception:
+            return None
     try:
-        resp = _get(LISTING_URL)
-        resp.raise_for_status()
+        with io.BytesIO(pdf_bytes) as fh:
+            txt = extract_text(fh, page_numbers=range(max_pages)) or ""
+        # light cleanup like utils
+        import re as _re
+        txt = _re.sub(r"[ \t]+\n", "\n", txt)
+        txt = _re.sub(r"\n{3,}", "\n\n", txt)
+        return txt.strip()
+    except Exception:
+        return None
+
+def _summarize_text_with_utils(text: str) -> List[str]:
+    """
+    Reuse your utils’ exact pipeline/quality:
+      single-topic → _openai_bullets → _legistar_rule_based_bullets → _post_filter_bullets
+    Obeys your env vars (model, limits).
+    """
+    # single-topic fast path
+    single = utils._is_single_topic_agenda(text)
+    if single:
+        return [utils.clean_text(single)]
+
+    # LLM
+    model = utils._DEFAULT_MODEL
+    bullets_llm = utils._openai_bullets(text, model=model) or []
+
+    # Rules
+    rules_raw = utils._legistar_rule_based_bullets(text, limit=max(36, utils._MAX_BULLETS * 3))
+    rules_best = utils._post_filter_bullets(rules_raw, limit=max(24, utils._MAX_BULLETS * 2))
+
+    # Merge with your precedence and limits
+    merged: List[str] = []
+    seen = set()
+    for src in (bullets_llm, rules_best):
+        for b in src:
+            k = utils.clean_text(b).lower()
+            if not k or k in seen:
+                continue
+            merged.append(utils.clean_text(b))
+            seen.add(k)
+            if len(merged) >= utils._MAX_BULLETS:
+                break
+        if len(merged) >= utils._MAX_BULLETS:
+            break
+
+    if not merged and not utils._SUMMARIZER_STRICT:
+        merged = utils._post_filter_bullets(utils._legistar_rule_based_bullets(text, limit=36), limit=utils._MAX_BULLETS)
+
+    return merged
+
+def _title_is_city_council(title: str) -> bool:
+    t = (title or "").lower()
+    return "council" in t  # optional: and "work session" not in t
+
+def _fmt_date_time_local(dt_obj: datetime) -> Tuple[str, str]:
+    dt_mt = utils.to_mt(dt_obj)
+    date_str = dt_mt.strftime("%Y-%m-%d")
+    time_str = dt_mt.strftime("%-I:%M %p") if hasattr(dt_mt, "strftime") else dt_mt.strftime("%I:%M %p").lstrip("0")
+    return date_str, time_str
+
+def parse_salida() -> List[dict]:
+    items: List[dict] = []
+
+    # 1) Load listing
+    try:
+        r = _get(LISTING_URL)
+        r.raise_for_status()
     except Exception as e:
-        logging.error("Failed to load listing: %s", e)
+        LOG.error("Failed to load listing: %s", e)
         return items
 
-    event_links = _extract_event_links_from_listing(resp.text)
+    event_links = _extract_event_links(r.text)
     if not event_links:
-        logging.info("No event links found on listing (JS may have hidden them).")
+        LOG.info("No event links found on listing (JS may obscure them).")
         return items
 
-    # 2) Visit each event page, filter to future + City Council only
-    cutoff = _now_local() + dt.timedelta(days=LOOKAHEAD_DAYS)
+    # 2) Visit each event, filter upcoming City Council
     for event_url in sorted(set(event_links)):
         try:
-            rr = _get(event_url)
-            rr.raise_for_status()
-            soup = BeautifulSoup(rr.text, "html.parser")
+            er = _get(event_url)
+            er.raise_for_status()
+            soup = BeautifulSoup(er.text, "html.parser")
 
-            title = soup.find(["h1", "h2"])
-            title_text = (title.get_text(strip=True) if title else "City Council Meeting")
-            if "council" not in title_text.lower():
-                # Only City Council
+            # Title
+            h = soup.find(["h1", "h2"])
+            title = (h.get_text(strip=True) if h else "").strip() or "City Council Meeting"
+            if not _title_is_city_council(title):
                 continue
 
-            when_dt = _parse_event_datetime_from_event_page(soup)
+            # When & Location
+            when_dt, location = _parse_when_and_location(soup)
             if not when_dt:
-                # Can't date it; skip
+                continue
+            if not utils.is_future(when_dt):
                 continue
 
-            if not _is_future(when_dt) or when_dt > cutoff:
-                continue
-
-            # 3) Find agenda page(s)
-            agenda_pages = _find_agenda_pages(event_url, soup)
-
+            # Agenda page(s) → resolve either a .pdf URL or bytes from CivicClerk stream
+            agenda_urls = _find_agenda_pages(event_url, soup)
+            agenda_url_for_cache = None
             bullets: List[str] = []
-            used_pdf_url: Optional[str] = None
-            for ap in agenda_pages:
-                pdf_bytes, pdf_url = _extract_pdf_or_stream(ap)
-                if pdf_bytes:
-                    bullets = _summarize_pdf_bytes(pdf_bytes, city="Salida", max_bullets=16)
-                    used_pdf_url = pdf_url or ap
-                    break  # prefer first available agenda
 
-            # 4) If no agenda bytes yet, leave bullets empty (site can show "Agenda not posted")
-            items.append(
-                {
-                    "title": title_text,
-                    "when": _iso(when_dt),
-                    "source": event_url,          # show the meeting page (per your request to show full URL)
-                    "agenda_url": used_pdf_url,   # optional: direct agenda PDF/stream if found
-                    "bullets": bullets,           # newsworthy bullets (may be empty if agenda not posted yet)
-                    "city": "Salida",
-                    "board_id": BOARD_ID,
-                }
+            for ap in agenda_urls:
+                pdf_url, pdf_bytes = _resolve_pdf_url_or_stream(ap)
+
+                if pdf_url:
+                    # Your utils can handle true .pdf URLs directly (with cache etc.)
+                    bullets = utils.summarize_pdf_if_any(pdf_url)
+                    agenda_url_for_cache = pdf_url
+                    if bullets:
+                        break
+
+                elif pdf_bytes:
+                    # Handle CivicClerk stream (octet-stream) by summarizing locally
+                    text = _extract_text_from_pdf_bytes(pdf_bytes, max_pages=utils._DEFAULT_MAX_PAGES)
+                    if text:
+                        bullets = _summarize_text_with_utils(text)
+                        agenda_url_for_cache = ap  # keep the agenda page as reference URL
+                        if bullets:
+                            break
+
+            # 3) Build item using your schema
+            date_str, time_str = _fmt_date_time_local(when_dt)
+            item = utils.make_meeting(
+                city_or_body="City of Salida",
+                meeting_type=title,
+                date=date_str,
+                start_time_local=time_str,
+                status="Scheduled",
+                location=location,
+                agenda_url=agenda_url_for_cache,
+                agenda_summary=bullets,
+                source=event_url,
             )
+            items.append(item)
 
         except Exception as e:
-            logging.warning("Error while parsing %s: %s", event_url, e)
+            LOG.warning("Error while parsing %s: %s", event_url, e)
 
     return items
 
-
 if __name__ == "__main__":
-    # Manual run helper for local testing
     logging.basicConfig(level=logging.INFO)
-    data = parse_salida()
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    print(json.dumps(parse_salida(), indent=2, ensure_ascii=False))

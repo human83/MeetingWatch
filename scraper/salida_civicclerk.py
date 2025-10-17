@@ -13,7 +13,12 @@ from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 
 # Reuse your utils (timezone, future filter, meeting factory, summarizers)
-import utils
+try:
+    from . import utils        # when run as a package (python -m scraper.main)
+except ImportError:
+    import os, sys
+    sys.path.append(os.path.dirname(os.path.dirname(__file__)))  # add repo root
+    import utils
 
 BASE = "https://salidaco.portal.civicclerk.com"
 BOARD_ID = "41156"  # City Council

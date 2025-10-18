@@ -3,356 +3,335 @@ from __future__ import annotations
 
 import os
 import re
-import sys
-import time
 import json
 import traceback
-from typing import List, Dict, Optional, Tuple
+from urllib.parse import urljoin, urlparse
+from typing import List, Dict, Optional, Tuple, Iterable, Set
 
-from bs4 import BeautifulSoup  # type: ignore
 import requests  # type: ignore
+from bs4 import BeautifulSoup  # type: ignore
+from dateutil import parser as _dtparser  # type: ignore
 
-# Playwright is optional at import time; we handle absence at runtime
+# Playwright is optional
 try:
-    from playwright.sync_api import sync_playwright, Page  # type: ignore
+    from playwright.sync_api import sync_playwright
 except Exception:  # pragma: no cover
     sync_playwright = None
-    Page = object  # type: ignore
-
-# ---------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------
 
 CITY_NAME = "Salida"
 PROVIDER = "CivicClerk"
 
-# This URL works for many CivicClerk instances; adjust if your site differs.
-# If you need to override in CI, set SALIDA_CIVICCLERK_URL in the workflow env.
-SALIDA_BASE_URL = os.getenv(
-    "SALIDA_CIVICCLERK_URL",
-    "https://salida.civicclerk.com"
-)
+# Base host can be overridden in CI:
+SALIDA_BASE_URL = os.getenv("SALIDA_CIVICCLERK_URL", "https://salida.civicclerk.com").rstrip("/")
 
-# Common entry points to try (some tenants use /Meetings, others use /Meetings?*, etc.)
+# You can pass alternates e.g.: SALIDA_CIVICCLERK_ALT_HOSTS="https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com"
+ALT_HOSTS: List[str] = [h.strip().rstrip("/") for h in os.getenv("SALIDA_CIVICCLERK_ALT_HOSTS", "").split(",") if h.strip()]
+
 ENTRY_PATHS = [
-    "/en-US/Meetings",
-    "/Meetings",
-    "/",
+    "/", "/Meetings", "/en-US/Meetings", "/en/Meetings", "/en-US", "/en",
 ]
 
-# Cap how many tiles/links we’ll scan so we don’t waste cycles
-MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "80"))
+MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "120"))
+MAX_DISCOVERY_PAGES = int(os.getenv("CIVICCLERK_MAX_DISCOVERY", "20"))
 
-# ---------------------------------------------------------------------
-# Date parsing (tolerant)
-# ---------------------------------------------------------------------
-
-from dateutil import parser as _dtparser  # type: ignore
+# ------------------ date parsing ------------------
 
 _ORDINAL_RE = re.compile(r'(\d+)(st|nd|rd|th)\b', flags=re.I)
 
-def _parse_date(text: str) -> Optional[str]:
-    """
-    Best-effort parser for CivicClerk-style date strings.
-    Accepts:
-      - "October 23, 2025"
-      - "Oct 23, 2025, 6:00 PM"
-      - "Wed, Oct 23, 2025 at 6:00 PM"
-      - "10/23/2025 6:00 PM"
-      - "2025-10-23T18:00:00-06:00", etc.
-    Returns ISO date (YYYY-MM-DD) or None.
-    """
-    if not text:
-        return None
-
-    t = " ".join(str(text).strip().split())
-    t = _ORDINAL_RE.sub(r"\1", t)
-    # Make the very common " at " neutral for parsing
-    t = re.sub(r"\s+at\s+", " ", t, flags=re.I)
-
-    try:
-        dt = _dtparser.parse(t, fuzzy=True, dayfirst=False)
-        return dt.date().isoformat()
-    except Exception:
-        # Last-ditch: strip an hh:mm (AM/PM) bit and try again
-        t2 = re.split(r'\b\d{1,2}:\d{2}\s*(AM|PM)?\b', t, maxsplit=1, flags=re.I)[0]
-        try:
-            dt = _dtparser.parse(t2, fuzzy=True, dayfirst=False)
-            return dt.date().isoformat()
-        except Exception:
-            return None
-
-# ---------------------------------------------------------------------
-# Tile/date extractors
-# ---------------------------------------------------------------------
+# very tolerant date tokens: "Oct 23, 2025", "Wednesday, Oct 23, 2025 at 6:00 PM", "10/23/2025 6:00 PM"
+_FALLBACK_DATE_GUESS = re.compile(
+    r"(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*,?\s*)?"
+    r"([A-Za-z]{3,9}|\d{1,2})[\/\-\s.,]+(\d{1,2})[\/\-\s.,]+(\d{2,4})"
+    r"(?:\s*[,@]*\s*\d{1,2}:\d{2}\s*(AM|PM)?)?",
+    re.I,
+)
 
 def _clean(s: Optional[str]) -> str:
     return " ".join((s or "").split())
 
-def _extract_date_text_from_tile(page_or_elem) -> Optional[str]:
-    """
-    Given a Playwright Locator/ElementHandle or a bs4 tag, try common places
-    CivicClerk stores its date/time.
-    """
-    # Playwright path
-    try:
-        # prefer machine-readable attrs first on obvious nodes
-        for sel in ["time[datetime]", "time", ".meeting-date", ".date", "[data-date]", "[data-start]"]:
-            try:
-                loc = page_or_elem.locator(sel).first
-                if getattr(loc, "count", lambda: 0)():
-                    for attr in ("datetime", "data-date", "data-start", "aria-label", "title"):
-                        try:
-                            val = loc.get_attribute(attr)
-                            if val and val.strip():
-                                return _clean(val)
-                        except Exception:
-                            pass
-                    txt = loc.text_content()
-                    if txt and txt.strip():
-                        return _clean(txt)
-            except Exception:
-                pass
-
-        # sometimes the card itself carries labels
-        for attr in ("aria-label", "title", "data-date", "data-start"):
-            try:
-                val = page_or_elem.get_attribute(attr)
-                if val and val.strip():
-                    return _clean(val)
-            except Exception:
-                pass
-    except AttributeError:
-        # bs4 path
-        tag = page_or_elem
-        # Within children
-        for sel in ["time", ".meeting-date", ".date", "[data-date]", "[data-start]"]:
-            try:
-                found = tag.select_one(sel)
-                if found:
-                    # attributes first
-                    for attr in ("datetime", "data-date", "data-start", "aria-label", "title"):
-                        val = found.get(attr)
-                        if val and str(val).strip():
-                            return _clean(str(val))
-                    # then text
-                    txt = found.get_text(" ", strip=True)
-                    if txt:
-                        return _clean(txt)
-            except Exception:
-                pass
-
-        # attributes on the tile itself
-        for attr in ("aria-label", "title", "data-date", "data-start"):
-            val = tag.get(attr)
-            if val and str(val).strip():
-                return _clean(str(val))
-
-    return None
-
-def _extract_title_from_tile(page_or_elem) -> Optional[str]:
-    try:
-        # Playwright
-        for sel in ["h3", "h4", ".meeting-title", ".title", "a", "[role='link']"]:
-            try:
-                loc = page_or_elem.locator(sel).first
-                if getattr(loc, "count", lambda: 0)():
-                    txt = loc.text_content()
-                    if txt and txt.strip():
-                        return _clean(txt)
-            except Exception:
-                pass
-        # Fallback to overall text
-        try:
-            txt = page_or_elem.text_content()
-            if txt and txt.strip():
-                return _clean(txt)
-        except Exception:
-            pass
-    except AttributeError:
-        # bs4
-        tag = page_or_elem
-        for sel in ["h3", "h4", ".meeting-title", ".title", "a", "[role='link']"]:
-            found = tag.select_one(sel)
-            if found:
-                txt = found.get_text(" ", strip=True)
-                if txt:
-                    return _clean(txt)
-        txt = tag.get_text(" ", strip=True)
-        if txt:
-            return _clean(txt)
-
-    return None
-
-def _extract_href_from_tile(page_or_elem) -> Optional[str]:
-    """Find a likely meeting detail link."""
-    try:
-        # Playwright
-        for sel in ["a[href*='Meeting']", "a[href*='meeting']", "a[href*='Agenda']", "a[href]"]:
-            try:
-                loc = page_or_elem.locator(sel).first
-                if getattr(loc, "count", lambda: 0)():
-                    href = loc.get_attribute("href")
-                    if href and href.strip():
-                        return href
-            except Exception:
-                pass
+def _parse_date(text: str) -> Optional[str]:
+    if not text:
         return None
-    except AttributeError:
-        # bs4
-        tag = page_or_elem
+    t = _ORDINAL_RE.sub(r"\1", _clean(text))
+    t = re.sub(r"\s+at\s+", " ", t, flags=re.I)
+    try:
+        return _dtparser.parse(t, fuzzy=True, dayfirst=False).date().isoformat()
+    except Exception:
+        m = _FALLBACK_DATE_GUESS.search(t)
+        if m:
+            try:
+                return _dtparser.parse(m.group(0), fuzzy=True, dayfirst=False).date().isoformat()
+            except Exception:
+                return None
+        return None
+
+# ------------------ HTML helpers ------------------
+
+LIKELY_TILE_SEL = "[role='link'], a.meeting, .meeting, .tile, .card, article, li"
+LIKELY_TIME_CHILDREN = "time[datetime], time, .meeting-date, .date, [data-date], [data-start]"
+LIKELY_LINKS = "a[href*='Meeting'], a[href*='meeting'], a[href*='Agenda'], a[href*='agenda'], a[href]"
+
+PRI_WORDS = ("meeting", "agenda", "packet", "council", "board", "commission")
+
+def _same_site(base: str, href: str) -> bool:
+    try:
+        bu = urlparse(base)
+        hu = urlparse(href)
+        return (hu.netloc == "" or hu.netloc == bu.netloc) and (hu.scheme in ("", bu.scheme))
+    except Exception:
+        return True
+
+def _normalize(base: str, href: str) -> str:
+    if not href:
+        return base
+    return urljoin(base + "/", href)
+
+def _extract_text(tag) -> str:
+    try:
+        return _clean(tag.get_text(" ", strip=True))
+    except Exception:
+        return ""
+
+def _first_attr(tag, *names) -> Optional[str]:
+    for n in names:
+        v = tag.get(n)
+        if v and str(v).strip():
+            return _clean(str(v))
+    return None
+
+def _extract_date_text_from_bs4(tag) -> Optional[str]:
+    # children first
+    for sel in LIKELY_TIME_CHILDREN.split(","):
+        sel = sel.strip()
+        try:
+            found = tag.select_one(sel)
+        except Exception:
+            found = None
+        if found:
+            a = _first_attr(found, "datetime", "data-date", "data-start", "aria-label", "title")
+            if a:
+                return a
+            txt = _extract_text(found)
+            if txt:
+                return txt
+    # tile attrs
+    a = _first_attr(tag, "aria-label", "title", "data-date", "data-start")
+    if a:
+        return a
+    return None
+
+def _extract_title_from_bs4(tag) -> Optional[str]:
+    for sel in ("h1", "h2", "h3", "h4", ".meeting-title", ".title", "a", "[role='link']"):
+        try:
+            node = tag.select_one(sel)
+        except Exception:
+            node = None
+        if node:
+            t = _extract_text(node)
+            if t:
+                return t
+    t = _extract_text(tag)
+    return t or None
+
+def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
+    out: List[Dict] = []
+    tiles = soup.select(LIKELY_TILE_SEL)
+    if not tiles:
+        tiles = soup.select("a, article, li, div")
+    for tag in tiles[:MAX_TILES]:
+        # try to find a link first
+        href_tag = None
         for a in tag.select("a[href]"):
             href = a.get("href") or ""
-            if any(k in href for k in ("Meeting", "meeting", "Agenda", "agenda")):
-                return href
-        a = tag.select_one("a[href]")
-        if a:
-            return a.get("href")
-        return None
+            if any(k in href.lower() for k in ("meeting", "agenda", "packet")):
+                href_tag = a
+                break
+        if not href_tag:
+            href_tag = tag.select_one("a[href]")
+        href = href_tag.get("href") if href_tag else None
+        if not href:
+            continue
+        full = _normalize(source_url, href)
 
-# ---------------------------------------------------------------------
-# HTTP fallback (for light pages that don’t require JS)
-# ---------------------------------------------------------------------
+        dt_text = _extract_date_text_from_bs4(tag) or _extract_text(tag)
+        iso = _parse_date(dt_text)
+        if not iso:
+            # fall back: look for a nearby time element anywhere on page
+            times = soup.select("time[datetime], time")
+            for tm in times:
+                iso = _parse_date(_first_attr(tm, "datetime") or _extract_text(tm) or "")
+                if iso:
+                    break
+        if not iso:
+            # Still nothing; skip but log once per page
+            # (stdout is fine in CI)
+            print(f"[salida] Skip tile (no date): {full}")
+            continue
 
-def _requests_candidates(url: str) -> List[Dict]:
-    out: List[Dict] = []
-    try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        soup = BeautifulSoup(r.text, "html.parser")
-
-        tiles = soup.select("[role='link'], a.meeting, .meeting, .tile, .card")
-        if not tiles:
-            tiles = soup.select("a, article, li")
-
-        for tag in tiles[:MAX_TILES]:
-            href = _extract_href_from_tile(tag)
-            date_text = _extract_date_text_from_tile(tag) or ""
-            parsed_date = _parse_date(date_text)
-            if not parsed_date:
-                print(f"[salida] Skip: could not parse date from: {date_text!r}")
-                continue
-
-            title = _extract_title_from_tile(tag) or "Meeting"
-            # Normalize absolute URL
-            full_url = href if href and href.startswith("http") else (SALIDA_BASE_URL.rstrip("/") + "/" + (href or "").lstrip("/"))
-            out.append({
-                "city": CITY_NAME,
-                "provider": PROVIDER,
-                "title": title,
-                "date": parsed_date,
-                "url": full_url,
-                "source": url,
-            })
-    except Exception as e:
-        print(f"[salida] requests fallback failed: {e}")
-        traceback.print_exc()
-
+        title = _extract_title_from_bs4(tag) or "Meeting"
+        out.append({
+            "city": CITY_NAME,
+            "provider": PROVIDER,
+            "title": title,
+            "date": iso,
+            "url": full,
+            "source": source_url,
+        })
     return out
 
-# ---------------------------------------------------------------------
-# Main scrape
-# ---------------------------------------------------------------------
+# ------------------ requests path ------------------
+
+def _get_soup(url: str) -> Optional[BeautifulSoup]:
+    try:
+        r = requests.get(url, timeout=30, headers={"User-Agent": "MeetingWatch/1.0"})
+        if r.status_code >= 400:
+            print(f"[salida] HTTP {r.status_code} on {url}")
+            return None
+        return BeautifulSoup(r.text, "html.parser")
+    except Exception as e:
+        print(f"[salida] requests error {url}: {e}")
+        return None
+
+def _requests_candidates(url: str) -> List[Dict]:
+    soup = _get_soup(url)
+    if not soup:
+        return []
+    out = _scan_tiles_bs4(soup, url)
+    if out:
+        return out
+
+    # If no tiles, do discovery on this page: collect promising links, visit a few, scan again
+    links: List[str] = []
+    for a in soup.select("a[href]"):
+        href = a.get("href") or ""
+        text = _extract_text(a)
+        h = href.lower()
+        t = text.lower()
+        if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
+            full = _normalize(url, href)
+            if _same_site(url, full):
+                links.append(full)
+
+    dedup: List[str] = []
+    seen: Set[str] = set()
+    for l in links:
+        if l not in seen:
+            seen.add(l)
+            dedup.append(l)
+
+    results: List[Dict] = []
+    for target in dedup[:MAX_DISCOVERY_PAGES]:
+        sub = _get_soup(target)
+        if not sub:
+            continue
+        results.extend(_scan_tiles_bs4(sub, target))
+        if results:
+            break  # first success is enough
+
+    return results
+
+# ------------------ playwright path ------------------
 
 def _playwright_candidates(entry_url: str) -> List[Dict]:
     out: List[Dict] = []
-    if sync_playwright is None:  # Playwright not available
+    if sync_playwright is None:
         return out
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
             page = browser.new_page()
-            page.set_default_timeout(20000)
+            page.set_default_timeout(25000)
 
             print(f"[salida] Navigating to {entry_url}")
-            page.goto(entry_url, wait_until="domcontentloaded")
+            page.goto(entry_url, wait_until="networkidle")
 
-            # Try to find anchor links that look like meeting detail links
-            hrefs = set()
+            # Try common SPA containers before scanning
             for sel in [
-                "a[href*='Meeting']",
-                "a[href*='meeting']",
-                "a[href*='Agenda']",
-                "a[href*='agenda']",
+                "main",
+                "#root",
+                "[role='main']",
+                ".meetings",
+                ".agenda",
             ]:
                 try:
-                    for a in page.locator(sel).all()[:MAX_TILES]:
-                        href = a.get_attribute("href")
-                        if href:
-                            hrefs.add(href)
+                    page.locator(sel).first.wait_for(timeout=2000)
+                    break
                 except Exception:
                     pass
 
-            if hrefs:
-                print(f"[salida] Found candidate hrefs: {len(hrefs)}")
-                # Build minimal records; dates may come from the card or the target
-                tiles = page.locator("[role='link'], a.meeting, .meeting, .tile, .card")
-            else:
-                print(f"[salida] No hrefs; falling back to scanning tiles")
-                tiles = page.locator("[role='link'], a.meeting, .meeting, .tile, .card")
-                if tiles.count() == 0:
-                    tiles = page.locator("a, article, li")
+            # Collect promising onsite links for discovery
+            candidates: List[str] = []
+            anchors = page.locator("a[href]").all()
+            for a in anchors:
+                try:
+                    href = a.get_attribute("href") or ""
+                    text = (a.text_content() or "").strip()
+                    h = href.lower()
+                    t = text.lower()
+                    if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
+                        full = _normalize(entry_url, href)
+                        if _same_site(entry_url, full):
+                            candidates.append(full)
+                except Exception:
+                    pass
 
-            n_tiles = min(tiles.count(), MAX_TILES)
-            print(f"[salida] After tile-scan, candidates: {n_tiles}")
+            # Also scan current page for tiles
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            out.extend(_scan_tiles_bs4(soup, entry_url))
 
-            for i in range(n_tiles):
-                tile = tiles.nth(i)
-                date_text = _extract_date_text_from_tile(tile) or ""
-                parsed_date = _parse_date(date_text)
-                if not parsed_date:
-                    print(f"[salida] Skip: could not parse date from: {date_text!r}")
+            # If none, walk a few candidate links and repeat
+            seen: Set[str] = set()
+            for target in candidates[:MAX_DISCOVERY_PAGES]:
+                if target in seen:
                     continue
-
-                title = _extract_title_from_tile(tile) or "Meeting"
-                href = _extract_href_from_tile(tile) or ""
-                full_url = href if href.startswith("http") else (SALIDA_BASE_URL.rstrip("/") + "/" + href.lstrip("/"))
-
-                out.append({
-                    "city": CITY_NAME,
-                    "provider": PROVIDER,
-                    "title": title,
-                    "date": parsed_date,
-                    "url": full_url,
-                    "source": entry_url,
-                })
-
+                seen.add(target)
+                try:
+                    page.goto(target, wait_until="networkidle")
+                    html = page.content()
+                    soup = BeautifulSoup(html, "html.parser")
+                    sub = _scan_tiles_bs4(soup, target)
+                    if sub:
+                        out.extend(sub)
+                        break
+                except Exception:
+                    pass
         finally:
             browser.close()
-
     return out
 
-# ---------------------------------------------------------------------
-# Public API expected by scraper.main
-# ---------------------------------------------------------------------
+# ------------------ public API ------------------
+
+def _hosts_to_try() -> Iterable[str]:
+    tried = [SALIDA_BASE_URL] + ALT_HOSTS
+    # Remove duplicates while preserving order
+    seen: Set[str] = set()
+    for h in tried:
+        if h and h not in seen:
+            seen.add(h)
+            yield h
 
 def parse_salida() -> List[Dict]:
-    """
-    Scrape upcoming/visible meetings for Salida (CivicClerk) and return
-    a list of dicts with keys:
-      city, provider, title, date (YYYY-MM-DD), url, source
-    """
-    # Try multiple known entry points until we get results
     tried_urls: List[str] = []
     results: List[Dict] = []
 
-    for path in ENTRY_PATHS:
-        entry = SALIDA_BASE_URL.rstrip("/") + path
-        tried_urls.append(entry)
+    for host in _hosts_to_try():
+        for path in ENTRY_PATHS:
+            entry = (host + path).rstrip("/")
+            tried_urls.append(entry)
 
-        # Prefer Playwright (CivicClerk is often JS-rendered)
-        items = _playwright_candidates(entry)
-        if not items:
-            # fallback to requests/bs4 (in case the page is simple)
-            items = _requests_candidates(entry)
+            items = _playwright_candidates(entry)
+            if not items:
+                items = _requests_candidates(entry)
 
-        if items:
-            results.extend(items)
+            if items:
+                results.extend(items)
+                break
+        if results:
             break
 
-    # De-dup by (date, title, url)
-    seen: set[Tuple[str, str, str]] = set()
+    # de-dup
+    seen: Set[Tuple[str, str, str]] = set()
     unique: List[Dict] = []
     for m in results:
         key = (m.get("date", ""), m.get("title", ""), m.get("url", ""))
@@ -363,8 +342,5 @@ def parse_salida() -> List[Dict]:
     print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
     return unique
 
-
-# Manual test (optional): python -m scraper.salida_civicclerk
 if __name__ == "__main__":  # pragma: no cover
-    data = parse_salida()
-    print(json.dumps(data, indent=2))
+    print(json.dumps(parse_salida(), indent=2))

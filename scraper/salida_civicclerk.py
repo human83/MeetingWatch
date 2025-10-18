@@ -9,6 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as dtparser
 
+# utils import works in both "python -m scraper.main" and direct runs
 try:
     from . import utils
 except ImportError:
@@ -25,13 +26,14 @@ UA_HEADERS = {
     "Accept": "text/html,application/json;q=0.9,*/*;q=0.8",
 }
 
-# We’ll scan around known meeting IDs to find others (files pages); keep narrow to be polite.
+# Discover strategy:
+# 1) Board-level APIs (often empty for this tenant)
+# 2) Probe around known meeting IDs via Files API then HTML
+# 3) Emergency: known agenda IDs (guaranteed)
 SEED_EVENT_IDS = [519]
 PROBE_RADIUS   = 40
-
-# TEMP: if the files APIs hide things, we can still hit known agenda pages directly.
 SEED_AGENDA_IDS: Dict[int, List[int]] = {
-    519: [1101],   # meeting 519 -> agenda 1101 (from your verified URL)
+    519: [1101],   #  https://salidaco.portal.civicclerk.com/event/519/files/agenda/1101
 }
 
 LOG = logging.getLogger(__name__)
@@ -42,7 +44,7 @@ def _get(url: str, referer: Optional[str] = None) -> requests.Response:
         headers["Referer"] = referer
     return requests.get(url, headers=headers, timeout=utils._DEFAULT_HTTP_TIMEOUT)
 
-# ---------- Optional “board-level” API discovery (often blocked on this tenant) ----------
+# ---------------- Board APIs (may be empty here) ----------------
 def _fetch_board_meetings_api(board_id: str, days_ahead: int = 90) -> List[Dict[str, Any]]:
     start = utils.now_mt().date()
     end = start + timedelta(days=days_ahead)
@@ -72,36 +74,38 @@ def _fetch_board_meetings_api(board_id: str, days_ahead: int = 90) -> List[Dict[
     return []
 
 def _meeting_id_from_api_item(item: Dict[str, Any]) -> Optional[int]:
-    for key in ("eventId", "EventId", "id", "Id", "meetingId", "MeetingId"):
+    for key in ("eventId","EventId","meetingId","MeetingId","id","Id"):
         v = item.get(key)
-        if v is not None:
-            try: return int(v)
-            except: 
-                if isinstance(v, str) and v.isdigit(): return int(v)
-    for k in ("event", "meeting", "Event", "Meeting"):
-        if isinstance(item.get(k), dict):
-            nested = _meeting_id_from_api_item(item[k])
-            if nested: return nested
+        if v is None: continue
+        try:
+            return int(v)
+        except Exception:
+            if isinstance(v, str) and v.isdigit():
+                return int(v)
+    for k in ("event","Event","meeting","Meeting"):
+        sub = item.get(k)
+        if isinstance(sub, dict):
+            m = _meeting_id_from_api_item(sub)
+            if m: return m
     return None
 
 def _meeting_datetime_from_api_item(item: Dict[str, Any]) -> Optional[datetime]:
     for key in ("meetingDate","MeetingDate","startDate","StartDate","date","Date","eventDate"):
         v = item.get(key)
-        if v:
-            try: return dtparser.parse(str(v))
-            except: pass
-    for k in ("event","meeting","Event","Meeting"):
-        if isinstance(item.get(k), dict):
-            dtv = _meeting_datetime_from_api_item(item[k])
-            if dtv: return dtv
+        if not v: continue
+        try:
+            return dtparser.parse(str(v))
+        except Exception:
+            pass
+    for k in ("event","Event","meeting","Meeting"):
+        sub = item.get(k)
+        if isinstance(sub, dict):
+            d = _meeting_datetime_from_api_item(sub)
+            if d: return d
     return None
 
-# ---------- Per-meeting FILES API (reliable path) ----------
+# ---------------- Per-meeting FILES API / HTML ----------------
 def _fetch_files_for_meeting(mid: int) -> List[Dict[str, Any]]:
-    """
-    Try several endpoints that usually list attached files for a meeting.
-    We’re looking for 'Agenda' file types/categories.
-    """
     urls = [
         f"{API}/Meetings/GetMeetingFiles?meetingId={mid}",
         f"{API}/Meetings/GetMeetingFiles?eventId={mid}",
@@ -124,20 +128,19 @@ def _fetch_files_for_meeting(mid: int) -> List[Dict[str, Any]]:
 def _agenda_file_ids(files: List[Dict[str, Any]]) -> List[int]:
     ids = []
     for f in files:
-        name_bits = " ".join(str(f.get(k,"")) for k in ("name","fileName","title","typeName","categoryName")).lower()
-        if any(tok in name_bits for tok in ("agenda","packet")):
-            fid = f.get("fileId") or f.get("id") or f.get("FileId")
+        blob = " ".join(str(f.get(k,"")) for k in ("name","fileName","title","typeName","categoryName")).lower()
+        if any(tok in blob for tok in ("agenda","packet")):
+            fid = f.get("fileId") or f.get("FileId") or f.get("id")
             try:
-                fid = int(fid)
-                ids.append(fid)
-            except:
-                continue
+                ids.append(int(fid))
+            except Exception:
+                pass
     return sorted(set(ids))
 
-def _stream_pdf_bytes(file_id: int) -> Optional[bytes]:
+def _stream_pdf_bytes(file_id: int, referer: Optional[str] = None) -> Optional[bytes]:
     url = f"{API}/Meetings/GetMeetingFileStream(fileId={file_id},plainText=false)"
     try:
-        r = _get(url)
+        r = _get(url, referer=referer)
         if r.ok and r.content[:4] == b"%PDF":
             LOG.info("Salida: fetched PDF bytes from stream %s", url)
             return r.content
@@ -145,7 +148,6 @@ def _stream_pdf_bytes(file_id: int) -> Optional[bytes]:
         LOG.debug("PDF stream fail %s: %s", url, e)
     return None
 
-# ---------- HTML fallbacks (if needed) ----------
 def _agenda_page_urls_from_files_page(mid: int) -> List[str]:
     files_url = f"{BASE}/event/{mid}/files"
     try:
@@ -165,29 +167,53 @@ def _agenda_page_urls_from_files_page(mid: int) -> List[str]:
     return sorted(set(links))
 
 def _resolve_pdf_from_agenda_page(url: str) -> Tuple[Optional[str], Optional[bytes]]:
+    """Return (pdf_url, pdf_bytes). Tries anchors, stream links, then regex-extracts fileId."""
     try:
         r = _get(url)
         r.raise_for_status()
     except Exception:
         return None, None
+
     soup = BeautifulSoup(r.text, "html.parser")
+
+    # A) normal anchors
     for a in soup.select("a[href]"):
         href = a["href"]
         full = href if href.startswith("http") else (BASE + href if href.startswith("/") else None)
         if full and href.lower().endswith(".pdf"):
+            LOG.info("Salida: agenda page has direct PDF %s", full)
             return full, None
         if "GetMeetingFileStream" in href:
             stream = href if href.startswith("http") else BASE + href
             try:
-                rr = _get(stream)
+                rr = _get(stream, referer=url)
                 rr.raise_for_status()
                 if rr.content[:4] == b"%PDF":
+                    LOG.info("Salida: agenda page has stream link %s", stream)
                     return None, rr.content
             except Exception:
                 pass
+
+    # B) **regex fallback** — fileId in inline JS/HTML
+    m = re.search(r'fileId\s*=\s*(\d+)', r.text)
+    if not m:
+        m = re.search(r'[?&]fileId=(\d+)', r.text)
+    if m:
+        fid = int(m.group(1))
+        stream = f"{API}/Meetings/GetMeetingFileStream(fileId={fid},plainText=false)"
+        try:
+            rr = _get(stream, referer=url)
+            rr.raise_for_status()
+            if rr.content[:4] == b"%PDF":
+                LOG.info("Salida: regex-extracted fileId=%s -> stream ok", fid)
+                return None, rr.content
+        except Exception as e:
+            LOG.debug("Salida: regex stream fetch failed for fileId %s: %s", fid, e)
+
+    LOG.info("Salida: no PDF found on agenda page %s", url)
     return None, None
 
-# ---------- PDF → text → date/time → bullets ----------
+# ---------------- PDF → text → date/time → bullets ----------------
 def _extract_text_from_pdf_bytes(pdf_bytes: bytes, max_pages: int) -> Optional[str]:
     try:
         from pdfminer_high_level import extract_text
@@ -211,7 +237,6 @@ def _parse_datetime_from_text(text: str) -> Optional[datetime]:
     if m:
         try: return dtparser.parse(f"{m.group(1)} {m.group(2)}")
         except: pass
-    # looser fallback
     for ln in (ln.strip() for ln in text.splitlines() if ln.strip()):
         if re.search(r'[A-Za-z]+\s+\d{1,2},\s+\d{4}', ln):
             try: return dtparser.parse(ln)
@@ -220,7 +245,8 @@ def _parse_datetime_from_text(text: str) -> Optional[datetime]:
 
 def _summarize_text_with_utils(text: str) -> List[str]:
     single = utils._is_single_topic_agenda(text)
-    if single: return [utils.clean_text(single)]
+    if single:
+        return [utils.clean_text(single)]
     model = utils._DEFAULT_MODEL
     llm = utils._openai_bullets(text, model=model) or []
     rules = utils._post_filter_bullets(utils._legistar_rule_based_bullets(text, limit=max(36, utils._MAX_BULLETS*3)),
@@ -241,7 +267,7 @@ def _fmt_date_time_local(dt_obj: datetime) -> Tuple[str, str]:
     dt_mt = utils.to_mt(dt_obj)
     return dt_mt.strftime("%Y-%m-%d"), dt_mt.strftime("%-I:%M %p") if hasattr(dt_mt,'strftime') else dt_mt.strftime("%I:%M %p").lstrip("0")
 
-# ---------- ID probing ----------
+# ---------------- Probing helpers ----------------
 def _probe_ids_via_files_api(seeds: List[int], radius: int) -> List[int]:
     hits: List[int] = []
     for seed in seeds:
@@ -263,22 +289,22 @@ def _probe_ids_via_files_html(seeds: List[int], radius: int) -> List[int]:
                 hits.append(mid)
     return sorted(set(hits))
 
-# ---------- main ----------
+# ---------------- Main ----------------
 def parse_salida() -> List[dict]:
     items: List[dict] = []
 
-    # 1) Try board APIs (often empty on this tenant)
+    # 1) Board API discovery (if any)
     raw = _fetch_board_meetings_api(BOARD_ID, days_ahead=90)
     meeting_ids: List[int] = []
     for m in raw:
         mid = _meeting_id_from_api_item(m)
-        when_dt = _meeting_datetime_from_api_item(m)
-        if mid and when_dt and utils.is_future(when_dt):
+        when = _meeting_datetime_from_api_item(m)
+        if mid and when and utils.is_future(when):
             meeting_ids.append(mid)
     meeting_ids = sorted(set(meeting_ids))
     LOG.info("Salida: API normalized %d future meeting IDs", len(meeting_ids))
 
-    # 2) Probe around seeds via files API, then HTML, if needed
+    # 2) Probe around seeds via Files API then HTML
     if not meeting_ids:
         LOG.warning("Salida: no meeting IDs from API; probing around seeds %s", SEED_EVENT_IDS)
         meeting_ids = _probe_ids_via_files_api(SEED_EVENT_IDS, PROBE_RADIUS)
@@ -286,7 +312,7 @@ def parse_salida() -> List[dict]:
             LOG.warning("Salida: files API probe empty; probing HTML files pages")
             meeting_ids = _probe_ids_via_files_html(SEED_EVENT_IDS, PROBE_RADIUS)
 
-    # 3) As an emergency: use hard-coded agenda IDs if still nothing
+    # 3) If still nothing, use hard-coded agenda pages (emergency)
     use_seed_agendas = False
     if not meeting_ids and SEED_AGENDA_IDS:
         LOG.warning("Salida: neither API nor probing found anything; using SEED_AGENDA_IDS")
@@ -297,7 +323,7 @@ def parse_salida() -> List[dict]:
         LOG.warning("Salida: nothing found via API or probing; giving up for this run.")
         return items
 
-    # 4) Build items
+    # 4) For each meeting, resolve agenda → PDF → summarize → emit
     for mid in meeting_ids:
         try:
             event_url = f"{BASE}/event/{mid}"
@@ -310,19 +336,18 @@ def parse_salida() -> List[dict]:
 
             if use_seed_agendas and mid in SEED_AGENDA_IDS:
                 agenda_pages = [f"{BASE}/event/{mid}/files/agenda/{aid}" for aid in SEED_AGENDA_IDS[mid]]
+                LOG.info("Salida: using seed agenda pages for %s -> %s", mid, agenda_pages)
             else:
-                # Prefer files API
                 files = _fetch_files_for_meeting(mid)
                 if files:
                     file_ids = _agenda_file_ids(files)
                 if not file_ids:
-                    # Try HTML files page only if API yielded nothing
                     agenda_pages = _agenda_page_urls_from_files_page(mid)
 
-            # Resolve agendas -> PDF
+            # Resolve to a PDF
             if file_ids:
                 for fid in file_ids:
-                    pdf_bytes = _stream_pdf_bytes(fid)
+                    pdf_bytes = _stream_pdf_bytes(fid, referer=f"{BASE}/event/{mid}/files")
                     if not pdf_bytes:
                         continue
                     text_for_dt = _extract_text_from_pdf_bytes(pdf_bytes, max_pages=utils._DEFAULT_MAX_PAGES)
@@ -331,13 +356,14 @@ def parse_salida() -> List[dict]:
                         agenda_url_for_cache = f"{API}/Meetings/GetMeetingFileStream(fileId={fid},plainText=false)"
                         if bullets:
                             break
-            elif agenda_pages:
+
+            if not bullets and agenda_pages:
                 for ap in agenda_pages:
                     pdf_url, pdf_bytes = _resolve_pdf_from_agenda_page(ap)
                     if pdf_url:
                         bullets = utils.summarize_pdf_if_any(pdf_url)
                         agenda_url_for_cache = pdf_url
-                        # also try to get text for time parsing
+                        # also try to parse date/time
                         try:
                             rr = _get(pdf_url, referer=ap)
                             if rr.ok and rr.content[:4] == b"%PDF":
@@ -360,7 +386,7 @@ def parse_salida() -> List[dict]:
 
             when_dt = _parse_datetime_from_text(text_for_dt or "") if text_for_dt else None
             if not when_dt:
-                # Assume 6pm local so the card appears; will be refined on the next run when precise time is parsed
+                # assume 6pm local so it appears; next run will refine when precise time is parsed
                 when_dt = utils.now_mt().replace(hour=18, minute=0, second=0, microsecond=0)
             if not utils.is_future(when_dt):
                 continue

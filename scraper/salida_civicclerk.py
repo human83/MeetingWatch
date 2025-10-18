@@ -1,332 +1,370 @@
 # scraper/salida_civicclerk.py
-# Fixed Playwright usage + adds expected `parse_salida` entrypoint for scraper.main
-
 from __future__ import annotations
 
-import json
 import os
+import re
 import sys
 import time
+import json
 import traceback
-from dataclasses import dataclass, asdict
-from datetime import datetime
-from typing import Iterable, List, Optional, Union
+from typing import List, Dict, Optional, Tuple
 
-from playwright.sync_api import (
-    sync_playwright,
-    TimeoutError as PlaywrightTimeoutError,
-    Page,
-    Browser,
+from bs4 import BeautifulSoup  # type: ignore
+import requests  # type: ignore
+
+# Playwright is optional at import time; we handle absence at runtime
+try:
+    from playwright.sync_api import sync_playwright, Page  # type: ignore
+except Exception:  # pragma: no cover
+    sync_playwright = None
+    Page = object  # type: ignore
+
+# ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
+
+CITY_NAME = "Salida"
+PROVIDER = "CivicClerk"
+
+# This URL works for many CivicClerk instances; adjust if your site differs.
+# If you need to override in CI, set SALIDA_CIVICCLERK_URL in the workflow env.
+SALIDA_BASE_URL = os.getenv(
+    "SALIDA_CIVICCLERK_URL",
+    "https://salida.civicclerk.com"
 )
 
-__all__ = ["Meeting", "process_meetings", "parse_salida"]
-
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Meeting:
-    id: int
-    url: str
-    title: Optional[str] = None
-    date: Optional[str] = None  # ISO date string
-    location: Optional[str] = None
-    status: Optional[str] = None
-    agenda_url: Optional[str] = None
-    minutes_url: Optional[str] = None
-    packet_url: Optional[str] = None
-    notes: Optional[str] = None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-_DATE_FORMATS = [
-    "%B %d, %Y",   # October 18, 2025
-    "%b %d, %Y",   # Oct 18, 2025
-    "%m/%d/%Y",
-    "%Y-%m-%d",
-    "%m-%d-%Y",
+# Common entry points to try (some tenants use /Meetings, others use /Meetings?*, etc.)
+ENTRY_PATHS = [
+    "/en-US/Meetings",
+    "/Meetings",
+    "/",
 ]
 
-def _clean_text(txt: str | None) -> str:
-    if not txt:
-        return ""
-    return " ".join(txt.split())
+# Cap how many tiles/links we’ll scan so we don’t waste cycles
+MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "80"))
+
+# ---------------------------------------------------------------------
+# Date parsing (tolerant)
+# ---------------------------------------------------------------------
+
+from dateutil import parser as _dtparser  # type: ignore
+
+_ORDINAL_RE = re.compile(r'(\d+)(st|nd|rd|th)\b', flags=re.I)
 
 def _parse_date(text: str) -> Optional[str]:
-    """Try multiple formats and return ISO date string (YYYY-MM-DD) or None."""
-    t = _clean_text(text)
-    for fmt in _DATE_FORMATS:
+    """
+    Best-effort parser for CivicClerk-style date strings.
+    Accepts:
+      - "October 23, 2025"
+      - "Oct 23, 2025, 6:00 PM"
+      - "Wed, Oct 23, 2025 at 6:00 PM"
+      - "10/23/2025 6:00 PM"
+      - "2025-10-23T18:00:00-06:00", etc.
+    Returns ISO date (YYYY-MM-DD) or None.
+    """
+    if not text:
+        return None
+
+    t = " ".join(str(text).strip().split())
+    t = _ORDINAL_RE.sub(r"\1", t)
+    # Make the very common " at " neutral for parsing
+    t = re.sub(r"\s+at\s+", " ", t, flags=re.I)
+
+    try:
+        dt = _dtparser.parse(t, fuzzy=True, dayfirst=False)
+        return dt.date().isoformat()
+    except Exception:
+        # Last-ditch: strip an hh:mm (AM/PM) bit and try again
+        t2 = re.split(r'\b\d{1,2}:\d{2}\s*(AM|PM)?\b', t, maxsplit=1, flags=re.I)[0]
         try:
-            dt = datetime.strptime(t, fmt)
+            dt = _dtparser.parse(t2, fuzzy=True, dayfirst=False)
             return dt.date().isoformat()
-        except ValueError:
-            pass
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Core scraping
-# ---------------------------------------------------------------------------
-
-def _scrape_civicclerk_meeting(page: Page, m: Meeting, nav_timeout_ms: int = 30000) -> Meeting:
-    """
-    Navigate to a CivicClerk meeting page and extract common fields.
-
-    NOTE: CivicClerk sites are heavily templatized but have local tweaks.
-    If your instance needs custom selectors, adjust the CSS/XPath below.
-    """
-    page.set_default_timeout(nav_timeout_ms)
-
-    page.goto(m.url, wait_until="domcontentloaded")
-
-    # Title
-    try:
-        # Common title locations (adjust as needed for your tenant)
-        title = page.locator("h1, h2, .title, .meeting-title").first.text_content()
-        m.title = _clean_text(title) or m.title
-    except Exception:
-        pass
-
-    # Date
-    date_candidates = [
-        "text=/\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}/",   # 10/18/2025
-        "text=/\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\b.*\\d{4}/i",
-        ".meeting-date",
-        ".date",
-        "[data-testid='meeting-date']",
-    ]
-    found_date_text = None
-    for sel in date_candidates:
-        try:
-            loc = page.locator(sel).first
-            if loc.count() > 0:
-                txt = loc.text_content()
-                if txt:
-                    found_date_text = _clean_text(txt)
-                    break
         except Exception:
-            continue
+            return None
 
-    # Sometimes the date is in a label/value pair:
-    if not found_date_text:
-        try:
-            label = page.locator("text=/Date/i").first
-            if label.count():
-                val = label.locator("xpath=following::*[1]").first.text_content()
-                found_date_text = _clean_text(val)
-        except Exception:
-            pass
+# ---------------------------------------------------------------------
+# Tile/date extractors
+# ---------------------------------------------------------------------
 
-    if found_date_text:
-        parsed = _parse_date(found_date_text)
-        if parsed:
-            m.date = parsed
-        else:
-            m.notes = (m.notes or "") + (" | could not parse date: " + found_date_text)
+def _clean(s: Optional[str]) -> str:
+    return " ".join((s or "").split())
 
-    # Location (best-effort)
+def _extract_date_text_from_tile(page_or_elem) -> Optional[str]:
+    """
+    Given a Playwright Locator/ElementHandle or a bs4 tag, try common places
+    CivicClerk stores its date/time.
+    """
+    # Playwright path
     try:
-        loc_candidates = [
-            ".meeting-location",
-            ".location",
-            "[data-testid='meeting-location']",
-            "text=/Location/i >> xpath=following::*[1]",
-        ]
-        for sel in loc_candidates:
-            loc = page.locator(sel).first
-            if loc.count():
-                txt = _clean_text(loc.text_content())
-                if txt and len(txt) > 2:
-                    m.location = txt
-                    break
-    except Exception:
-        pass
-
-    # Links: agenda, minutes, packet
-    link_map = {
-        "agenda_url": ["text=/\\bAgenda\\b/i", "a.agenda-link"],
-        "minutes_url": ["text=/\\bMinutes\\b/i", "a.minutes-link"],
-        "packet_url": ["text=/\\bPacket\\b/i", "text=/\\bAgenda Packet\\b/i", "a.packet-link"],
-    }
-
-    for field, selectors in link_map.items():
-        if getattr(m, field, None):
-            continue
-        for sel in selectors:
+        # prefer machine-readable attrs first on obvious nodes
+        for sel in ["time[datetime]", "time", ".meeting-date", ".date", "[data-date]", "[data-start]"]:
             try:
-                anchor = page.locator(sel).first
-                if anchor.count():
-                    href = anchor.get_attribute("href")
-                    if href and href.strip():
-                        setattr(m, field, href)
-                        break
-            except Exception:
-                continue
-
-    # Status (if present)
-    try:
-        status_candidates = [".status", ".meeting-status", "[data-testid='meeting-status']"]
-        for sel in status_candidates:
-            st = page.locator(sel).first
-            if st.count():
-                txt = _clean_text(st.text_content())
-                if txt:
-                    m.status = txt
-                    break
-    except Exception:
-        pass
-
-    return m
-
-
-def process_meetings(
-    meetings: Iterable[Union[Meeting, dict]],
-    *,
-    headless: bool = True,
-    nav_timeout_ms: int = 30000,
-    reuse_single_page: bool = True,
-) -> List[Meeting]:
-    """
-    Preferred Playwright pattern with robust error logging.
-    """
-    results: List[Meeting] = []
-
-    with sync_playwright() as pw:
-        browser: Browser = pw.chromium.launch(headless=headless)
-        try:
-            context = browser.new_context()
-            page = context.new_page() if reuse_single_page else None
-
-            for m in meetings:
-                try:
-                    if not isinstance(m, Meeting):
-                        m = Meeting(**m)
-
-                    if reuse_single_page and page is not None:
-                        updated = _scrape_civicclerk_meeting(page, m, nav_timeout_ms=nav_timeout_ms)
-                    else:
-                        pg = context.new_page()
+                loc = page_or_elem.locator(sel).first
+                if getattr(loc, "count", lambda: 0)():
+                    for attr in ("datetime", "data-date", "data-start", "aria-label", "title"):
                         try:
-                            updated = _scrape_civicclerk_meeting(pg, m, nav_timeout_ms=nav_timeout_ms)
-                        finally:
-                            pg.close()
-
-                    results.append(updated)
-
-                except PlaywrightTimeoutError as te:
-                    print(f"Salida: timeout for meeting {getattr(m,'id',None)}: {te!r}")
-                    traceback.print_exc()
-                except Exception as e:
-                    print(f"Salida: error for meeting {getattr(m,'id',None)}: {e!r}")
-                    traceback.print_exc()
-                finally:
-                    time.sleep(0.25)
-
-        finally:
-            try:
-                context.close()
+                            val = loc.get_attribute(attr)
+                            if val and val.strip():
+                                return _clean(val)
+                        except Exception:
+                            pass
+                    txt = loc.text_content()
+                    if txt and txt.strip():
+                        return _clean(txt)
             except Exception:
                 pass
+
+        # sometimes the card itself carries labels
+        for attr in ("aria-label", "title", "data-date", "data-start"):
+            try:
+                val = page_or_elem.get_attribute(attr)
+                if val and val.strip():
+                    return _clean(val)
+            except Exception:
+                pass
+    except AttributeError:
+        # bs4 path
+        tag = page_or_elem
+        # Within children
+        for sel in ["time", ".meeting-date", ".date", "[data-date]", "[data-start]"]:
+            try:
+                found = tag.select_one(sel)
+                if found:
+                    # attributes first
+                    for attr in ("datetime", "data-date", "data-start", "aria-label", "title"):
+                        val = found.get(attr)
+                        if val and str(val).strip():
+                            return _clean(str(val))
+                    # then text
+                    txt = found.get_text(" ", strip=True)
+                    if txt:
+                        return _clean(txt)
+            except Exception:
+                pass
+
+        # attributes on the tile itself
+        for attr in ("aria-label", "title", "data-date", "data-start"):
+            val = tag.get(attr)
+            if val and str(val).strip():
+                return _clean(str(val))
+
+    return None
+
+def _extract_title_from_tile(page_or_elem) -> Optional[str]:
+    try:
+        # Playwright
+        for sel in ["h3", "h4", ".meeting-title", ".title", "a", "[role='link']"]:
+            try:
+                loc = page_or_elem.locator(sel).first
+                if getattr(loc, "count", lambda: 0)():
+                    txt = loc.text_content()
+                    if txt and txt.strip():
+                        return _clean(txt)
+            except Exception:
+                pass
+        # Fallback to overall text
+        try:
+            txt = page_or_elem.text_content()
+            if txt and txt.strip():
+                return _clean(txt)
+        except Exception:
+            pass
+    except AttributeError:
+        # bs4
+        tag = page_or_elem
+        for sel in ["h3", "h4", ".meeting-title", ".title", "a", "[role='link']"]:
+            found = tag.select_one(sel)
+            if found:
+                txt = found.get_text(" ", strip=True)
+                if txt:
+                    return _clean(txt)
+        txt = tag.get_text(" ", strip=True)
+        if txt:
+            return _clean(txt)
+
+    return None
+
+def _extract_href_from_tile(page_or_elem) -> Optional[str]:
+    """Find a likely meeting detail link."""
+    try:
+        # Playwright
+        for sel in ["a[href*='Meeting']", "a[href*='meeting']", "a[href*='Agenda']", "a[href]"]:
+            try:
+                loc = page_or_elem.locator(sel).first
+                if getattr(loc, "count", lambda: 0)():
+                    href = loc.get_attribute("href")
+                    if href and href.strip():
+                        return href
+            except Exception:
+                pass
+        return None
+    except AttributeError:
+        # bs4
+        tag = page_or_elem
+        for a in tag.select("a[href]"):
+            href = a.get("href") or ""
+            if any(k in href for k in ("Meeting", "meeting", "Agenda", "agenda")):
+                return href
+        a = tag.select_one("a[href]")
+        if a:
+            return a.get("href")
+        return None
+
+# ---------------------------------------------------------------------
+# HTTP fallback (for light pages that don’t require JS)
+# ---------------------------------------------------------------------
+
+def _requests_candidates(url: str) -> List[Dict]:
+    out: List[Dict] = []
+    try:
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+
+        tiles = soup.select("[role='link'], a.meeting, .meeting, .tile, .card")
+        if not tiles:
+            tiles = soup.select("a, article, li")
+
+        for tag in tiles[:MAX_TILES]:
+            href = _extract_href_from_tile(tag)
+            date_text = _extract_date_text_from_tile(tag) or ""
+            parsed_date = _parse_date(date_text)
+            if not parsed_date:
+                print(f"[salida] Skip: could not parse date from: {date_text!r}")
+                continue
+
+            title = _extract_title_from_tile(tag) or "Meeting"
+            # Normalize absolute URL
+            full_url = href if href and href.startswith("http") else (SALIDA_BASE_URL.rstrip("/") + "/" + (href or "").lstrip("/"))
+            out.append({
+                "city": CITY_NAME,
+                "provider": PROVIDER,
+                "title": title,
+                "date": parsed_date,
+                "url": full_url,
+                "source": url,
+            })
+    except Exception as e:
+        print(f"[salida] requests fallback failed: {e}")
+        traceback.print_exc()
+
+    return out
+
+# ---------------------------------------------------------------------
+# Main scrape
+# ---------------------------------------------------------------------
+
+def _playwright_candidates(entry_url: str) -> List[Dict]:
+    out: List[Dict] = []
+    if sync_playwright is None:  # Playwright not available
+        return out
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.set_default_timeout(20000)
+
+            print(f"[salida] Navigating to {entry_url}")
+            page.goto(entry_url, wait_until="domcontentloaded")
+
+            # Try to find anchor links that look like meeting detail links
+            hrefs = set()
+            for sel in [
+                "a[href*='Meeting']",
+                "a[href*='meeting']",
+                "a[href*='Agenda']",
+                "a[href*='agenda']",
+            ]:
+                try:
+                    for a in page.locator(sel).all()[:MAX_TILES]:
+                        href = a.get_attribute("href")
+                        if href:
+                            hrefs.add(href)
+                except Exception:
+                    pass
+
+            if hrefs:
+                print(f"[salida] Found candidate hrefs: {len(hrefs)}")
+                # Build minimal records; dates may come from the card or the target
+                tiles = page.locator("[role='link'], a.meeting, .meeting, .tile, .card")
+            else:
+                print(f"[salida] No hrefs; falling back to scanning tiles")
+                tiles = page.locator("[role='link'], a.meeting, .meeting, .tile, .card")
+                if tiles.count() == 0:
+                    tiles = page.locator("a, article, li")
+
+            n_tiles = min(tiles.count(), MAX_TILES)
+            print(f"[salida] After tile-scan, candidates: {n_tiles}")
+
+            for i in range(n_tiles):
+                tile = tiles.nth(i)
+                date_text = _extract_date_text_from_tile(tile) or ""
+                parsed_date = _parse_date(date_text)
+                if not parsed_date:
+                    print(f"[salida] Skip: could not parse date from: {date_text!r}")
+                    continue
+
+                title = _extract_title_from_tile(tile) or "Meeting"
+                href = _extract_href_from_tile(tile) or ""
+                full_url = href if href.startswith("http") else (SALIDA_BASE_URL.rstrip("/") + "/" + href.lstrip("/"))
+
+                out.append({
+                    "city": CITY_NAME,
+                    "provider": PROVIDER,
+                    "title": title,
+                    "date": parsed_date,
+                    "url": full_url,
+                    "source": entry_url,
+                })
+
+        finally:
             browser.close()
 
-    return results
+    return out
 
+# ---------------------------------------------------------------------
+# Public API expected by scraper.main
+# ---------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Public entrypoint expected by scraper.main
-# ---------------------------------------------------------------------------
-
-def parse_salida(
-    items: Optional[Union[str, Iterable[Union[Meeting, dict]]]] = None,
-    *,
-    headless: bool = True,
-    nav_timeout_ms: int = 30000,
-    reuse_single_page: bool = True,
-) -> List[dict]:
+def parse_salida() -> List[Dict]:
     """
-    Flexible wrapper used by scraper.main.
-
-    Accepts either:
-      • an iterable of Meeting-like dicts (each with at least {id, url}), or
-      • a string path to a JSON file that contains such a list.
-
-    Returns a list of plain dicts (safe for JSON serialization).
+    Scrape upcoming/visible meetings for Salida (CivicClerk) and return
+    a list of dicts with keys:
+      city, provider, title, date (YYYY-MM-DD), url, source
     """
-    # Allow main.py to call us with a path or an iterable
-    if isinstance(items, str):
-        with open(items, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-        meetings_iter = payload
-    elif items is None:
-        meetings_iter = []  # nothing to do, but keep call site happy
-    else:
-        meetings_iter = items
+    # Try multiple known entry points until we get results
+    tried_urls: List[str] = []
+    results: List[Dict] = []
 
-    results = process_meetings(
-        meetings_iter,
-        headless=headless,
-        nav_timeout_ms=nav_timeout_ms,
-        reuse_single_page=reuse_single_page,
-    )
-    return [asdict(m) for m in results]
+    for path in ENTRY_PATHS:
+        entry = SALIDA_BASE_URL.rstrip("/") + path
+        tried_urls.append(entry)
 
+        # Prefer Playwright (CivicClerk is often JS-rendered)
+        items = _playwright_candidates(entry)
+        if not items:
+            # fallback to requests/bs4 (in case the page is simple)
+            items = _requests_candidates(entry)
 
-# ---------------------------------------------------------------------------
-# CLI convenience (optional)
-# ---------------------------------------------------------------------------
+        if items:
+            results.extend(items)
+            break
 
-def _load_meetings_from_json(path: str) -> List[Meeting]:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    meetings: List[Meeting] = []
-    for item in raw:
-        if isinstance(item, dict):
-            meetings.append(Meeting(**item))
-        else:
-            raise ValueError(f"Invalid meeting item in {path}: {item!r}")
-    return meetings
+    # De-dup by (date, title, url)
+    seen: set[Tuple[str, str, str]] = set()
+    unique: List[Dict] = []
+    for m in results:
+        key = (m.get("date", ""), m.get("title", ""), m.get("url", ""))
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
+
+    print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
+    return unique
 
 
-def _save_meetings_to_json(path: str, meetings: List[Meeting]) -> None:
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump([asdict(m) for m in meetings], f, ensure_ascii=False, indent=2)
-
-
-def main(argv: List[str]) -> int:
-    """
-    Usage:
-      python -m scraper.salida_civicclerk input_meetings.json output_meetings.json
-    Where input JSON is a list of objects with at least { "id": int, "url": str }.
-    """
-    if len(argv) < 3:
-        print("Usage: python -m scraper.salida_civicclerk <input.json> <output.json>")
-        return 2
-
-    inp, outp = argv[1], argv[2]
-    try:
-        meetings = _load_meetings_from_json(inp)
-    except Exception as e:
-        print(f"Salida: failed to load meetings from {inp}: {e!r}")
-        traceback.print_exc()
-        return 1
-
-    results = process_meetings(meetings, headless=True, nav_timeout_ms=30000, reuse_single_page=True)
-
-    try:
-        _save_meetings_to_json(outp, results)
-        print(f"Salida: wrote {len(results)} meetings to {outp}")
-    except Exception as e:
-        print(f"Salida: failed to write output {outp}: {e!r}")
-        traceback.print_exc()
-        return 1
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main(sys.argv))
+# Manual test (optional): python -m scraper.salida_civicclerk
+if __name__ == "__main__":  # pragma: no cover
+    data = parse_salida()
+    print(json.dumps(data, indent=2))

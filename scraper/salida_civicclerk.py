@@ -1,6 +1,5 @@
-# salida_civicclerk.py
-# Fixed Playwright usage (no more "'PlaywrightContextManager' object is not callable")
-# + clearer errors and resilient date parsing.
+# scraper/salida_civicclerk.py
+# Fixed Playwright usage + adds expected `parse_salida` entrypoint for scraper.main
 
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ import time
 import traceback
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from typing import Iterable, List, Optional
+from typing import Iterable, List, Optional, Union
 
 from playwright.sync_api import (
     sync_playwright,
@@ -19,6 +18,8 @@ from playwright.sync_api import (
     Page,
     Browser,
 )
+
+__all__ = ["Meeting", "process_meetings", "parse_salida"]
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -91,7 +92,6 @@ def _scrape_civicclerk_meeting(page: Page, m: Meeting, nav_timeout_ms: int = 300
         pass
 
     # Date
-    # Try a few likely spots; fallback to meta tags.
     date_candidates = [
         "text=/\\d{1,2}\\/\\d{1,2}\\/\\d{2,4}/",   # 10/18/2025
         "text=/\\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\\b.*\\d{4}/i",
@@ -146,7 +146,7 @@ def _scrape_civicclerk_meeting(page: Page, m: Meeting, nav_timeout_ms: int = 300
     except Exception:
         pass
 
-    # Links: agenda, minutes, packet (names vary). We look for anchor text and known classes.
+    # Links: agenda, minutes, packet
     link_map = {
         "agenda_url": ["text=/\\bAgenda\\b/i", "a.agenda-link"],
         "minutes_url": ["text=/\\bMinutes\\b/i", "a.minutes-link"],
@@ -184,24 +184,17 @@ def _scrape_civicclerk_meeting(page: Page, m: Meeting, nav_timeout_ms: int = 300
 
 
 def process_meetings(
-    meetings: Iterable[Meeting],
+    meetings: Iterable[Union[Meeting, dict]],
     *,
     headless: bool = True,
     nav_timeout_ms: int = 30000,
     reuse_single_page: bool = True,
 ) -> List[Meeting]:
     """
-    Entry point used by the rest of the scraper.
-
-    IMPORTANT: This uses the **preferred** context manager pattern:
-      with sync_playwright() as pw:
-          ...
-
-    It also prints full tracebacks so CI logs show the exact file/line on errors.
+    Preferred Playwright pattern with robust error logging.
     """
     results: List[Meeting] = []
 
-    # --- FIX: proper context manager usage (no calling PlaywrightContextManager) ---
     with sync_playwright() as pw:
         browser: Browser = pw.chromium.launch(headless=headless)
         try:
@@ -211,7 +204,6 @@ def process_meetings(
             for m in meetings:
                 try:
                     if not isinstance(m, Meeting):
-                        # Support plain dicts that look like Meeting
                         m = Meeting(**m)
 
                     if reuse_single_page and page is not None:
@@ -226,13 +218,12 @@ def process_meetings(
                     results.append(updated)
 
                 except PlaywrightTimeoutError as te:
-                    print(f"Salida: timeout for meeting {m.id}: {te!r}")
+                    print(f"Salida: timeout for meeting {getattr(m,'id',None)}: {te!r}")
                     traceback.print_exc()
                 except Exception as e:
-                    print(f"Salida: error for meeting {m.id}: {e!r}")
+                    print(f"Salida: error for meeting {getattr(m,'id',None)}: {e!r}")
                     traceback.print_exc()
                 finally:
-                    # Be a little polite to hosts; helps avoid throttling.
                     time.sleep(0.25)
 
         finally:
@@ -246,6 +237,45 @@ def process_meetings(
 
 
 # ---------------------------------------------------------------------------
+# Public entrypoint expected by scraper.main
+# ---------------------------------------------------------------------------
+
+def parse_salida(
+    items: Optional[Union[str, Iterable[Union[Meeting, dict]]]] = None,
+    *,
+    headless: bool = True,
+    nav_timeout_ms: int = 30000,
+    reuse_single_page: bool = True,
+) -> List[dict]:
+    """
+    Flexible wrapper used by scraper.main.
+
+    Accepts either:
+      • an iterable of Meeting-like dicts (each with at least {id, url}), or
+      • a string path to a JSON file that contains such a list.
+
+    Returns a list of plain dicts (safe for JSON serialization).
+    """
+    # Allow main.py to call us with a path or an iterable
+    if isinstance(items, str):
+        with open(items, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        meetings_iter = payload
+    elif items is None:
+        meetings_iter = []  # nothing to do, but keep call site happy
+    else:
+        meetings_iter = items
+
+    results = process_meetings(
+        meetings_iter,
+        headless=headless,
+        nav_timeout_ms=nav_timeout_ms,
+        reuse_single_page=reuse_single_page,
+    )
+    return [asdict(m) for m in results]
+
+
+# ---------------------------------------------------------------------------
 # CLI convenience (optional)
 # ---------------------------------------------------------------------------
 
@@ -255,7 +285,6 @@ def _load_meetings_from_json(path: str) -> List[Meeting]:
     meetings: List[Meeting] = []
     for item in raw:
         if isinstance(item, dict):
-            # Accept either {"id":..., "url":...} or full Meeting dictionary.
             meetings.append(Meeting(**item))
         else:
             raise ValueError(f"Invalid meeting item in {path}: {item!r}")
@@ -263,7 +292,7 @@ def _load_meetings_from_json(path: str) -> List[Meeting]:
 
 
 def _save_meetings_to_json(path: str, meetings: List[Meeting]) -> None:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump([asdict(m) for m in meetings], f, ensure_ascii=False, indent=2)
 
@@ -271,11 +300,11 @@ def _save_meetings_to_json(path: str, meetings: List[Meeting]) -> None:
 def main(argv: List[str]) -> int:
     """
     Usage:
-      python -m salida_civicclerk input_meetings.json output_meetings.json
+      python -m scraper.salida_civicclerk input_meetings.json output_meetings.json
     Where input JSON is a list of objects with at least { "id": int, "url": str }.
     """
     if len(argv) < 3:
-        print("Usage: python -m salida_civicclerk <input.json> <output.json>")
+        print("Usage: python -m scraper.salida_civicclerk <input.json> <output.json>")
         return 2
 
     inp, outp = argv[1], argv[2]

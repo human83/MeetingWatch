@@ -3,7 +3,7 @@ name: Build site
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"       # hourly; adjust as needed
+    - cron: "0 * * * *"     # hourly; adjust if you want
   push:
     branches: [ main ]
 
@@ -71,25 +71,28 @@ jobs:
           python -m scraper.main
           test -d data && ls -la data || (echo "no data dir generated" && exit 1)
 
-      # --- Summarization step (this is what produces the bullets) ---
+      # === Summarization step (produces the bullets) ===
       - name: Summarize agendas (GPT)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          ( python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries ) || python -m scraper.summarize
+          # Try explicit CLI first; ignore failure, then try module fallback
+          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries || true
+          python -m scraper.summarize || true
           echo "---- agenda_summaries ----"
           ls -la data/cache/agenda_summaries || true
 
-      - name: Sanity check: did we produce any bullets?
+      - name: "Sanity check: did we produce any bullets?"
         run: |
-          python -c "import json,glob,sys; b=0
-for p in glob.glob('data/cache/agenda_summaries/*.json'):
-    try:
-        obj=json.load(open(p))
-        b+=1 if obj.get('bullets') else 0
-    except Exception:
-        pass
-print(f'Found {b} items with bullets'); sys.exit(0 if b>0 else 1)"
+          # Count JSON files that contain a "bullets" field
+          n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)
+          echo "Files with bullets: ${n}"
+          if [ "${n}" -gt 0 ]; then
+            exit 0
+          else
+            echo "No bullets produced by summarizer." >&2
+            exit 1
+          fi
 
       - name: Upload data artifact
         uses: actions/upload-artifact@v4

@@ -442,22 +442,25 @@ def parse_salida() -> List[Dict]:
     tried_urls: List[str] = []
     results: List[Dict] = []
 
+    # Crawl a few likely entry points on a couple of hostnames
     for host in _hosts_to_try():
         for path in ENTRY_PATHS:
             entry = (host + path).rstrip("/")
             tried_urls.append(entry)
 
+            # Prefer your Playwright path if it returns anything
             items = _playwright_candidates(entry)
             if not items:
                 items = _requests_candidates(entry)
 
             if items:
                 results.extend(items)
+            if results:
                 break
         if results:
             break
 
-    # de-dup
+    # --- de-dup based on (date, title, url) like your original ---
     seen: Set[Tuple[str, str, str]] = set()
     unique: List[Dict] = []
     for m in results:
@@ -466,22 +469,107 @@ def parse_salida() -> List[Dict]:
             seen.add(key)
             unique.append(m)
 
-    print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
-
-    # NEW: enrich each item with a direct agenda/packet PDF if present
-    # This is what lets the summarizer create bullet points.
+    # ---------- NEW: enrich each meeting with a direct agenda/packet PDF ----------
     for m in unique:
-        src = m.get("url") or ""
-        try:
-            pdf = find_agenda_pdf(src, soup=None)
-        except Exception:
-            pdf = None
-        if pdf:
-            # summarizer looks for 'agenda' (and/or 'agenda_url'); set both to be safe
-            m["agenda"] = pdf
-            m["agenda_url"] = pdf
+        # If we already have a direct PDF URL as "url", mirror it to agenda_url
+        u = (m.get("url") or "").strip()
+        if u.lower().endswith(".pdf"):
+            m["agenda_url"] = u
+            continue
 
+        # Otherwise try to find the agenda/packet PDF on the event's files page.
+        # Use "url" first, else fall back to source.
+        source_for_files = u or (m.get("source") or "").strip()
+        agenda = find_agenda_pdf(source_for_files)
+        if agenda:
+            m["agenda_url"] = agenda
+
+    print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
     return unique
+
+
+def find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
+    """
+    Try to find an agenda/packet PDF on a CivicClerk *event files* page and
+    return an absolute URL or None.
+
+    Heuristics:
+      - Prefer links with text/aria-label/title containing 'Agenda' or 'Packet'.
+      - Exclude obvious 'Minutes' links.
+      - Prefer URLs that end in .pdf.
+      - If multiple candidates, choose the one that looks most like an agenda/packet.
+    """
+    # If caller accidentally passed a non-event page, try to reach the files tab.
+    # e.g., /event/519  -> /event/519/files
+    m = re.search(r"(/event/\d+)(/files)?/?$", source_url)
+    if m and not m.group(2):
+        source_url = urljoin(source_url, m.group(1) + "/files")
+
+    try:
+        if soup is None:
+            r = requests.get(source_url, timeout=30)
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return None
+
+    # Collect all <a> tags with hrefs; CivicClerk also uses data-file-ext
+    links: List[Tuple[str, str]] = []
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if not href:
+            continue
+        text = " ".join([
+            a.get_text(" ", strip=True) or "",
+            a.get("aria-label", "") or "",
+            a.get("title", "") or "",
+            a.get("data-file-name", "") or "",
+        ]).strip()
+        links.append((href, text))
+
+    if not links:
+        return None
+
+    # Score links by how much they look like agendas/packets
+    def score(href: str, text: str) -> int:
+        t = f"{href} {text}".lower()
+
+        # Base score if it's a PDF
+        s = 10 if ".pdf" in href.lower() or href.lower().endswith(".pdf") else 0
+
+        # Strong positive signals
+        if "agenda" in t: s += 25
+        if "packet" in t: s += 20
+        if "board packet" in t or "meeting packet" in t or "council packet" in t: s += 5
+        if "regular meeting" in t or "work session" in t: s += 3
+
+        # Negative signals
+        if "minutes" in t: s -= 30
+        if "video" in t or "livestream" in t: s -= 15
+
+        # Prefer shorter query/link clutter a bit less
+        if "?" not in href: s += 2
+
+        return s
+
+    # Rank candidates
+    scored: List[Tuple[int, str]] = []
+    base = source_url
+    for href, text in links:
+        absu = urljoin(base, href)
+        scored.append((score(href, text), absu))
+
+    scored.sort(reverse=True, key=lambda x: x[0])
+
+    # Top candidate must be a positive score and should end with .pdf ideally
+    for s, u in scored:
+        if s <= 0:
+            break
+        if u.lower().endswith(".pdf"):
+            return u
+
+    # If nothing ended in .pdf but we have a positive candidate, return the best one
+    return scored[0][1] if scored and scored[0][0] > 0 else None
 
 
 

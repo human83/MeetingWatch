@@ -436,6 +436,8 @@ def _hosts_to_try() -> Iterable[str]:
             yield h
 
 
+# --- replace your current parse_salida() with this version ---
+
 def parse_salida() -> List[Dict]:
     tried_urls: List[str] = []
     results: List[Dict] = []
@@ -465,7 +467,22 @@ def parse_salida() -> List[Dict]:
             unique.append(m)
 
     print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
+
+    # NEW: enrich each item with a direct agenda/packet PDF if present
+    # This is what lets the summarizer create bullet points.
+    for m in unique:
+        src = m.get("url") or ""
+        try:
+            pdf = find_agenda_pdf(src, soup=None)
+        except Exception:
+            pdf = None
+        if pdf:
+            # summarizer looks for 'agenda' (and/or 'agenda_url'); set both to be safe
+            m["agenda"] = pdf
+            m["agenda_url"] = pdf
+
     return unique
+
 
 
 if __name__ == "__main__":  # pragma: no cover

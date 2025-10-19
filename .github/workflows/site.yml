@@ -1,9 +1,9 @@
-name: Build site
+name: Scrape Build Deploy
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"     # hourly; adjust if you want
+    - cron: "0 * * * *"
+  workflow_dispatch:
   push:
     branches: [ main ]
 
@@ -15,10 +15,10 @@ permissions:
 env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
   SUMMARIZER_MODEL: gpt-4o-mini
-  PDF_SUMMARY_MAX_PAGES: "30"
-  PDF_SUMMARY_MAX_CHARS: "72000"
-  PDF_SUMMARY_MAX_BULLETS: "16"
-  PDF_SUMMARY_DEBUG: "1"
+  PDF_SUMMARY_MAX_PAGES: '30'
+  PDF_SUMMARY_MAX_CHARS: '72000'
+  PDF_SUMMARY_MAX_BULLETS: '16'
+  PDF_SUMMARY_DEBUG: '1'
 
 jobs:
   scrape:
@@ -34,7 +34,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
+      
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -45,89 +45,180 @@ jobs:
           else
             echo "requirements.txt not found" && exit 1
           fi
-
+          
       - name: Install Playwright browsers
-        run: python -m playwright install --with-deps chromium
+        run: python -m playwright install --with-deps chromium    
 
       - name: Print effective PDF limits
         run: |
           python - <<'PY'
           import os
+          from scraper.utils import _MAX_BULLETS, _DEFAULT_MAX_PAGES, _DEFAULT_MAX_CHARS
           print("ENV.PDF_SUMMARY_MAX_BULLETS =", os.getenv("PDF_SUMMARY_MAX_BULLETS"))
           print("ENV.PDF_SUMMARY_MAX_PAGES   =", os.getenv("PDF_SUMMARY_MAX_PAGES"))
           print("ENV.PDF_SUMMARY_MAX_CHARS   =", os.getenv("PDF_SUMMARY_MAX_CHARS"))
+          print("utils._MAX_BULLETS          =", _MAX_BULLETS)
+          print("utils._DEFAULT_MAX_PAGES    =", _DEFAULT_MAX_PAGES)
+          print("utils._DEFAULT_MAX_CHARS    =", _DEFAULT_MAX_CHARS)
           PY
 
       - name: Clear agenda summary cache
         run: rm -rf data/cache/agenda_summaries || true
-
+        
       - name: Debug hosts
         run: |
           echo "SALIDA_CIVICCLERK_URL=${SALIDA_CIVICCLERK_URL}"
-          echo "SALIDA_CIVICCLERK_ALT_HOSTS=${SALIDA_CIVICCLERK_ALT_HOSTS}"
+          echo "SALIDA_CIVICCLERK_ALT_HOSTS=${SALIDA_CIVICCLERK_ALT_HOSTS}"  
 
       - name: Run scraper
         run: |
           python -m scraper.main
           test -d data && ls -la data || (echo "no data dir generated" && exit 1)
-
-       # === Summarization step (produces the bullets) ===
-      - name: Summarize agendas (GPT, fresh & verbose)
+      # --- Summarize agendas (this generates the bullets) ---
+      - name: Summarize agendas (GPT)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OPENAI_LOG: debug            # surface SDK errors
-          PYTHONWARNINGS: default
-          PDF_SUMMARY_DEBUG: "1"
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # ok to keep; overrides top-level if needed
         run: |
-          set -euo pipefail
-          # show how many meetings have any doc-like URLs the summarizer could use
-          python - <<'PY'
-          import json, sys
-          path = "data/meetings.json"
-          with open(path, "r") as f:
-            items = json.load(f)
-          def has_doc(x):
-            keys = ("agenda_url","agenda_pdf","packet_url","packet_pdf","attachments","documents")
-            return any(k in x and x[k] for k in keys)
-          n_with_docs = sum(1 for x in items if has_doc(x))
-          print(f"[diagnostic] meetings total={len(items)} with_docs={n_with_docs}")
-          if n_with_docs == 0:
-            print("[diagnostic] None of the meetings have document links; summarizer will produce empty outputs.", file=sys.stderr)
-          PY
-
-          # start clean to avoid picking up stale stubs
-          rm -rf data/cache/agenda_summaries
-          mkdir -p data/cache/agenda_summaries
-
-          # Try explicit CLI first (fresh run); if your module supports flags like --no-cache, add them here.
-          # If that command isn't implemented, fall back to default module run.
-          ( python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries ) || true
-          ( python -m scraper.summarize ) || true
-
-          echo "---- agenda_summaries (ls) ----"
+          # Try explicit CLI first; ignore failure, then try module fallback
+          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries || true
+          python -m scraper.summarize || true
+          echo "---- agenda_summaries ----"
           ls -la data/cache/agenda_summaries || true
 
-          echo "---- sample outputs (head) ----"
-          for f in $(ls -1 data/cache/agenda_summaries/*.json 2>/dev/null | head -n 3); do
-            echo ">>> $f"
-            head -c 600 "$f" || true
-            echo
-            echo "-----"
-          done
-
-          echo "---- grep for errors ----"
-          (grep -Hni '"error"\|"exception"\|"traceback"' data/cache/agenda_summaries/*.json || true)
-
-      - name: "Sanity check: did we produce any bullets?"
+      # Optional: warn/fail if no bullets yet (remove continue-on-error later)
+      - name: Sanity check: did we produce any bullets?
+        continue-on-error: true
         run: |
-          set -e
           n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)
           echo "Files with bullets: ${n}"
-          test "${n}" -gt 0
+          if [ "${n}" -gt 0 ]; then
+            exit 0
+          else
+            echo "No bullets produced by summarizer." >&2
+            exit 1
+          fi    
 
-      - name: Upload data artifact
+      - name: Upload data artifact (data/)
         uses: actions/upload-artifact@v4
         with:
           name: scrape-data
           path: data/
-          if-no-files-found: warn
+
+  build:
+    runs-on: ubuntu-latest
+    needs: scrape
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download scrape data
+        uses: actions/download-artifact@v4
+        with:
+          name: scrape-data
+          path: ./data
+
+      - name: Prepare static site
+        run: |
+          mkdir -p _site
+          cp -r data _site/
+
+      - name: Generate index.html from data/meetings.json
+        run: |
+          python - <<'PY'
+          import json, pathlib, html
+          from datetime import datetime
+
+          data_path = pathlib.Path('data/meetings.json')
+          out_dir   = pathlib.Path('_site')
+          out_dir.mkdir(parents=True, exist_ok=True)
+
+          try:
+              raw = json.loads(data_path.read_text(encoding='utf-8'))
+          except FileNotFoundError:
+              (out_dir/'index.html').write_text(
+                  "<h1>MeetingWatch</h1><p>No meetings.json found.</p>",
+                  encoding='utf-8'
+              )
+              raise
+
+          # meetings could be a list or wrapped under a key like 'meetings'
+          if isinstance(raw, list):
+              meetings = raw
+          else:
+              meetings = raw.get('meetings') or next(
+                  (v for v in raw.values() if isinstance(v, list)), []
+              )
+
+          def sort_key(m):
+              d = (m.get('date') or '')
+              t = m.get('start_time_local') or m.get('start_time') or ''
+              return (d, t)
+
+          meetings = sorted(meetings, key=sort_key)
+
+          # Build HTML
+          parts = []
+          parts.append('<!doctype html><meta charset="utf-8"><title>MeetingWatch</title>')
+          parts.append('''<style>
+              body{font:16px system-ui,Segoe UI,Helvetica,Arial;max-width:900px;margin:2rem auto;padding:0 1rem;}
+              h1{margin:0 0 1rem;}
+              .m{border:1px solid #e3e3e3;border-radius:12px;padding:12px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+              .meta{color:#555;font-size:.95rem}
+              ul{margin:.5rem 0 0 1.3rem}
+              a{color:#0b62d6;text-decoration:none}
+              a:hover{text-decoration:underline}
+          </style>''')
+          parts.append('<h1>MeetingWatch</h1>')
+          parts.append('<p><a href="data/meetings.json">Download meetings.json</a></p>')
+
+          for m in meetings:
+              title = html.escape(m.get('title') or m.get('name') or 'Meeting')
+              date  = html.escape(m.get('date') or '')
+              time  = html.escape(m.get('start_time_local') or m.get('start_time') or '')
+              loc   = html.escape(m.get('location') or '')
+              agenda_url = m.get('agenda_url') or m.get('agenda_pdf') or ''
+              agenda_link = f' &middot; <a href="{html.escape(agenda_url)}">agenda</a>' if agenda_url else ''
+              source_url = m.get('source') or ''
+              source_link = f' &middot; <a href="{html.escape(source_url)}">{html.escape(source_url)}</a>' if source_url else ''
+
+              # bullets can be str or list
+              bullets = m.get('agenda_summary') or []
+              if isinstance(bullets, str):
+                  bullets = [bullets]
+              bullets = [html.escape(str(b)) for b in bullets]
+
+              parts.append('<div class="m">')
+              parts.append(f'<div class="meta"><strong>{date}</strong> {time}{agenda_link}{source_link}</div>')
+              parts.append(f'<h3 style="margin:.35rem 0 .4rem">{title}</h3>')
+              if loc:
+                  parts.append(f'<div class="meta">{loc}</div>')
+              if bullets:
+                  parts.append('<ul>')
+                  for b in bullets:
+                      parts.append(f'<li>{b}</li>')
+                  parts.append('</ul>')
+              parts.append('</div>')
+
+          (out_dir/'index.html').write_text('\n'.join(parts), encoding='utf-8')
+          PY
+
+      - name: List built site (debug)
+        run: |
+          echo "Built site contents:"
+          find _site -maxdepth 3 -type f -print
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

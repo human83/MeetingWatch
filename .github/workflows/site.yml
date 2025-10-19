@@ -95,8 +95,8 @@ jobs:
 
       - name: "Sanity check: did we produce any bullets?"
         run: |
-          n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)
-          echo "Files with bullets: ${n}"
+          n=$(grep -H '"merged": [1-9][0-9]*' data/cache/agenda_summaries/*.meta.json 2>/dev/null | wc -l || true)
+          echo "Summaries with merged bullets: ${n}"
           test "${n}" -gt 0
 
       - name: Upload data artifact (data/)

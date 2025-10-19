@@ -4,8 +4,9 @@ from __future__ import annotations
 import os
 import re
 import json
+import html
 from datetime import date
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, parse_qs, urlsplit, unquote
 from typing import List, Dict, Optional, Tuple, Iterable, Set
 
 import requests  # type: ignore
@@ -188,6 +189,64 @@ def _extract_meeting_href(tag) -> Optional[str]:
     return None
 
 
+# ---------- PDF finder helpers (robust for the new portal) ----------
+
+def _extract_pdf_from_viewer_like(soup: BeautifulSoup, base: str) -> Optional[str]:
+    """
+    Handle pdf.js viewer and other embed patterns to recover the underlying PDF.
+    """
+    # 1) pdf.js toolbar usually has: <a id="download" href="...pdf">
+    a = soup.select_one("a#download[href$='.pdf'], a#download[href*='.pdf']")
+    if a and a.get("href"):
+        return _normalize(base, a.get("href"))
+
+    # 2) <iframe src="/viewer.html?file=<pdf-url>"> or similar
+    for frame in soup.select("iframe[src], embed[src], object[data]"):
+        src = frame.get("src") or frame.get("data") or ""
+        if not src:
+            continue
+        abs_src = _normalize(base, src)
+        # direct .pdf?
+        if abs_src.lower().endswith(".pdf") or ".pdf" in abs_src.lower():
+            return abs_src
+        # extract ?file=
+        try:
+            qs = parse_qs(urlsplit(abs_src).query)
+            file_param = qs.get("file") or qs.get("FILE")
+            if file_param:
+                candidate = unquote(file_param[0])
+                # file param can be html-encoded
+                candidate = html.unescape(candidate)
+                return _normalize(base, candidate)
+        except Exception:
+            pass
+
+    # 3) Look into <script> blobs for a ...file:"/path/to.pdf" or url:"...pdf"
+    script_pdf = re.compile(r"""(?:"|')(?:file|url)(?:"|')\s*:\s*(?P<q>['"])(?P<u>[^'"]+?\.pdf)(?P=q)""", re.I)
+    for sc in soup.find_all("script"):
+        try:
+            txt = sc.string or sc.get_text() or ""
+        except Exception:
+            txt = ""
+        m = script_pdf.search(txt)
+        if m:
+            return _normalize(base, m.group("u"))
+
+    return None
+
+
+def _get_soup(url: str) -> Optional[BeautifulSoup]:
+    try:
+        r = requests.get(url, timeout=30, headers={"User-Agent": "MeetingWatch/1.0"})
+        if r.status_code >= 400:
+            print(f"[salida] HTTP {r.status_code} on {url}")
+            return None
+        return BeautifulSoup(r.text, "html.parser")
+    except Exception as e:
+        print(f"[salida] requests error {url}: {e}")
+        return None
+
+
 def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
     """Try to find an agenda/packet PDF on a meeting page and return absolute URL or None."""
     try:
@@ -208,6 +267,11 @@ def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> O
         a = soup.select_one("a[href$='.pdf']")
         if a and a.get("href"):
             return _normalize(source_url, a.get("href"))
+
+        # New portal: recover the PDF from the viewer iframe / toolbar / scripts
+        portal_pdf = _extract_pdf_from_viewer_like(soup, source_url)
+        if portal_pdf:
+            return portal_pdf
     except Exception:
         pass
     return None
@@ -282,18 +346,6 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
 
 # ---------- requests path ----------
 
-def _get_soup(url: str) -> Optional[BeautifulSoup]:
-    try:
-        r = requests.get(url, timeout=30, headers={"User-Agent": "MeetingWatch/1.0"})
-        if r.status_code >= 400:
-            print(f"[salida] HTTP {r.status_code} on {url}")
-            return None
-        return BeautifulSoup(r.text, "html.parser")
-    except Exception as e:
-        print(f"[salida] requests error {url}: {e}")
-        return None
-
-
 def _requests_candidates(url: str) -> List[Dict]:
     soup = _get_soup(url)
     if not soup:
@@ -321,7 +373,7 @@ def _requests_candidates(url: str) -> List[Dict]:
         if not target:
             continue
         h = (target or "").lower()
-        t = text.lower()
+        t = (text or "").lower()
         if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
             full = _normalize(url, target)
             if _same_site(url, full):
@@ -391,7 +443,7 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
                     if not target:
                         continue
                     h = (target or "").lower()
-                    t = text.lower()
+                    t = (text or "").lower()
                     if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
                         full = _normalize(entry_url, target)
                         if _same_site(entry_url, full):
@@ -436,8 +488,6 @@ def _hosts_to_try() -> Iterable[str]:
             yield h
 
 
-# --- replace your current parse_salida() with this version ---
-
 def parse_salida() -> List[Dict]:
     tried_urls: List[str] = []
     results: List[Dict] = []
@@ -460,7 +510,7 @@ def parse_salida() -> List[Dict]:
         if results:
             break
 
-    # --- de-dup based on (date, title, url) like your original ---
+    # de-dup based on (date, title, url)
     seen: Set[Tuple[str, str, str]] = set()
     unique: List[Dict] = []
     for m in results:
@@ -469,10 +519,11 @@ def parse_salida() -> List[Dict]:
             seen.add(key)
             unique.append(m)
 
-    # ---------- NEW: enrich each meeting with a direct agenda/packet PDF ----------
+    # Enrich each meeting with a direct agenda/packet PDF when possible
     for m in unique:
-        # If we already have a direct PDF URL as "url", mirror it to agenda_url
         u = (m.get("url") or "").strip()
+
+        # If we already have a direct PDF URL as "url", mirror it to agenda_url
         if u.lower().endswith(".pdf"):
             m["agenda_url"] = u
             continue
@@ -497,23 +548,25 @@ def find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Op
       - Prefer links with text/aria-label/title containing 'Agenda' or 'Packet'.
       - Exclude obvious 'Minutes' links.
       - Prefer URLs that end in .pdf.
-      - If multiple candidates, choose the one that looks most like an agenda/packet.
+      - Also handle viewer pages like /event/<id>/files/agenda/<fileId>
+        by extracting the underlying PDF from the embedded pdf.js viewer.
     """
-    # If caller accidentally passed a non-event page, try to reach the files tab.
-    # e.g., /event/519  -> /event/519/files
+    # If caller passed event root, hop to /files
     m = re.search(r"(/event/\d+)(/files)?/?$", source_url)
     if m and not m.group(2):
         source_url = urljoin(source_url, m.group(1) + "/files")
 
     try:
         if soup is None:
-            r = requests.get(source_url, timeout=30)
+            r = requests.get(source_url, timeout=30, headers={"User-Agent": "MeetingWatch/1.0"})
             r.raise_for_status()
             soup = BeautifulSoup(r.text, "html.parser")
     except Exception:
         return None
 
-    # Collect all <a> tags with hrefs; CivicClerk also uses data-file-ext
+    base = source_url
+
+    # Collect raw links
     links: List[Tuple[str, str]] = []
     for a in soup.select("a[href]"):
         href = a.get("href", "")
@@ -527,8 +580,12 @@ def find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Op
         ]).strip()
         links.append((href, text))
 
-    if not links:
-        return None
+    # Special handling: If current page is a "viewer" subpage, dive deeper first.
+    # e.g., /event/519/files/agenda/1101
+    if re.search(r"/event/\d+/files/.+/\d+/?$", urlparse(base).path):
+        pdf_from_viewer = _extract_pdf_from_viewer_like(soup, base)
+        if pdf_from_viewer:
+            return pdf_from_viewer
 
     # Score links by how much they look like agendas/packets
     def score(href: str, text: str) -> int:
@@ -552,25 +609,35 @@ def find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Op
 
         return s
 
-    # Rank candidates
-    scored: List[Tuple[int, str]] = []
-    base = source_url
-    for href, text in links:
-        absu = urljoin(base, href)
-        scored.append((score(href, text), absu))
+    if links:
+        scored: List[Tuple[int, str]] = []
+        for href, text in links:
+            absu = urljoin(base, href)
+            scored.append((score(href, text), absu))
 
-    scored.sort(reverse=True, key=lambda x: x[0])
+        scored.sort(reverse=True, key=lambda x: x[0])
 
-    # Top candidate must be a positive score and should end with .pdf ideally
-    for s, u in scored:
-        if s <= 0:
-            break
-        if u.lower().endswith(".pdf"):
-            return u
+        # Top candidate must be a positive score and should end with .pdf ideally
+        for s, u in scored:
+            if s <= 0:
+                break
+            if u.lower().endswith(".pdf"):
+                return u
 
-    # If nothing ended in .pdf but we have a positive candidate, return the best one
-    return scored[0][1] if scored and scored[0][0] > 0 else None
+        # If nothing ended in .pdf but we have a positive candidate, return the best one
+        if scored and scored[0][0] > 0:
+            # If best is a viewer subpage, open it and try to pull the PDF
+            best = scored[0][1]
+            if re.search(r"/event/\d+/files/.+/\d+/?$", urlparse(best).path):
+                sub = _get_soup(best)
+                if sub:
+                    viewer_pdf = _extract_pdf_from_viewer_like(sub, best)
+                    if viewer_pdf:
+                        return viewer_pdf
+            return best
 
+    # Last-ditch: try to recover from embedded viewer on the current page
+    return _extract_pdf_from_viewer_like(soup, base)
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -1,9 +1,9 @@
-name: Scrape Build Deploy
+name: Build site
 
 on:
-  schedule:
-    - cron: "0 * * * *"
   workflow_dispatch:
+  schedule:
+    - cron: "0 * * * *"   # hourly; tweak as you like
   push:
     branches: [ main ]
 
@@ -15,10 +15,10 @@ permissions:
 env:
   OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
   SUMMARIZER_MODEL: gpt-4o-mini
-  PDF_SUMMARY_MAX_PAGES: '30'
-  PDF_SUMMARY_MAX_CHARS: '72000'
-  PDF_SUMMARY_MAX_BULLETS: '16'
-  PDF_SUMMARY_DEBUG: '1'
+  PDF_SUMMARY_MAX_PAGES: "30"
+  PDF_SUMMARY_MAX_CHARS: "72000"
+  PDF_SUMMARY_MAX_BULLETS: "16"
+  PDF_SUMMARY_DEBUG: "1"
 
 jobs:
   scrape:
@@ -34,7 +34,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -45,157 +45,62 @@ jobs:
           else
             echo "requirements.txt not found" && exit 1
           fi
-          
+
       - name: Install Playwright browsers
-        run: python -m playwright install --with-deps chromium    
+        run: python -m playwright install --with-deps chromium
 
       - name: Print effective PDF limits
         run: |
           python - <<'PY'
           import os
-          from scraper.utils import _MAX_BULLETS, _DEFAULT_MAX_PAGES, _DEFAULT_MAX_CHARS
           print("ENV.PDF_SUMMARY_MAX_BULLETS =", os.getenv("PDF_SUMMARY_MAX_BULLETS"))
           print("ENV.PDF_SUMMARY_MAX_PAGES   =", os.getenv("PDF_SUMMARY_MAX_PAGES"))
           print("ENV.PDF_SUMMARY_MAX_CHARS   =", os.getenv("PDF_SUMMARY_MAX_CHARS"))
-          print("utils._MAX_BULLETS          =", _MAX_BULLETS)
-          print("utils._DEFAULT_MAX_PAGES    =", _DEFAULT_MAX_PAGES)
-          print("utils._DEFAULT_MAX_CHARS    =", _DEFAULT_MAX_CHARS)
           PY
 
       - name: Clear agenda summary cache
         run: rm -rf data/cache/agenda_summaries || true
-        
+
       - name: Debug hosts
         run: |
           echo "SALIDA_CIVICCLERK_URL=${SALIDA_CIVICCLERK_URL}"
-          echo "SALIDA_CIVICCLERK_ALT_HOSTS=${SALIDA_CIVICCLERK_ALT_HOSTS}"  
+          echo "SALIDA_CIVICCLERK_ALT_HOSTS=${SALIDA_CIVICCLERK_ALT_HOSTS}"
 
       - name: Run scraper
         run: |
           python -m scraper.main
           test -d data && ls -la data || (echo "no data dir generated" && exit 1)
 
-      - name: Upload data artifact (data/)
+      # 🔽 THIS is the missing piece
+      - name: Summarize agendas (GPT)
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          # Try with explicit args; if the module has no CLI, fall back to default
+          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries || \
+          python -m scraper.summarize
+          # show what we built
+          echo "---- agenda_summaries ----"
+          ls -la data/cache/agenda_summaries || true
+
+      - name: Sanity check: did we produce any bullets?
+        run: |
+          python - <<'PY'
+          import json, os, glob, sys
+          bullets = 0
+          for p in glob.glob("data/cache/agenda_summaries/*.json"):
+            try:
+              obj = json.load(open(p))
+              if obj.get("bullets"): bullets += 1
+            except Exception: pass
+          print(f"Found {bullets} items with bullets")
+          sys.exit(0 if bullets > 0 else 1)
+          PY
+
+      - name: Upload data artifact
         uses: actions/upload-artifact@v4
         with:
           name: scrape-data
-          path: data/
-
-  build:
-    runs-on: ubuntu-latest
-    needs: scrape
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download scrape data
-        uses: actions/download-artifact@v4
-        with:
-          name: scrape-data
-          path: ./data
-
-      - name: Prepare static site
-        run: |
-          mkdir -p _site
-          cp -r data _site/
-
-      - name: Generate index.html from data/meetings.json
-        run: |
-          python - <<'PY'
-          import json, pathlib, html
-          from datetime import datetime
-
-          data_path = pathlib.Path('data/meetings.json')
-          out_dir   = pathlib.Path('_site')
-          out_dir.mkdir(parents=True, exist_ok=True)
-
-          try:
-              raw = json.loads(data_path.read_text(encoding='utf-8'))
-          except FileNotFoundError:
-              (out_dir/'index.html').write_text(
-                  "<h1>MeetingWatch</h1><p>No meetings.json found.</p>",
-                  encoding='utf-8'
-              )
-              raise
-
-          # meetings could be a list or wrapped under a key like 'meetings'
-          if isinstance(raw, list):
-              meetings = raw
-          else:
-              meetings = raw.get('meetings') or next(
-                  (v for v in raw.values() if isinstance(v, list)), []
-              )
-
-          def sort_key(m):
-              d = (m.get('date') or '')
-              t = m.get('start_time_local') or m.get('start_time') or ''
-              return (d, t)
-
-          meetings = sorted(meetings, key=sort_key)
-
-          # Build HTML
-          parts = []
-          parts.append('<!doctype html><meta charset="utf-8"><title>MeetingWatch</title>')
-          parts.append('''<style>
-              body{font:16px system-ui,Segoe UI,Helvetica,Arial;max-width:900px;margin:2rem auto;padding:0 1rem;}
-              h1{margin:0 0 1rem;}
-              .m{border:1px solid #e3e3e3;border-radius:12px;padding:12px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04);}
-              .meta{color:#555;font-size:.95rem}
-              ul{margin:.5rem 0 0 1.3rem}
-              a{color:#0b62d6;text-decoration:none}
-              a:hover{text-decoration:underline}
-          </style>''')
-          parts.append('<h1>MeetingWatch</h1>')
-          parts.append('<p><a href="data/meetings.json">Download meetings.json</a></p>')
-
-          for m in meetings:
-              title = html.escape(m.get('title') or m.get('name') or 'Meeting')
-              date  = html.escape(m.get('date') or '')
-              time  = html.escape(m.get('start_time_local') or m.get('start_time') or '')
-              loc   = html.escape(m.get('location') or '')
-              agenda_url = m.get('agenda_url') or m.get('agenda_pdf') or ''
-              agenda_link = f' &middot; <a href="{html.escape(agenda_url)}">agenda</a>' if agenda_url else ''
-              source_url = m.get('source') or ''
-              source_link = f' &middot; <a href="{html.escape(source_url)}">{html.escape(source_url)}</a>' if source_url else ''
-
-              # bullets can be str or list
-              bullets = m.get('agenda_summary') or []
-              if isinstance(bullets, str):
-                  bullets = [bullets]
-              bullets = [html.escape(str(b)) for b in bullets]
-
-              parts.append('<div class="m">')
-              parts.append(f'<div class="meta"><strong>{date}</strong> {time}{agenda_link}{source_link}</div>')
-              parts.append(f'<h3 style="margin:.35rem 0 .4rem">{title}</h3>')
-              if loc:
-                  parts.append(f'<div class="meta">{loc}</div>')
-              if bullets:
-                  parts.append('<ul>')
-                  for b in bullets:
-                      parts.append(f'<li>{b}</li>')
-                  parts.append('</ul>')
-              parts.append('</div>')
-
-          (out_dir/'index.html').write_text('\n'.join(parts), encoding='utf-8')
-          PY
-
-      - name: List built site (debug)
-        run: |
-          echo "Built site contents:"
-          find _site -maxdepth 3 -type f -print
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: _site
-
-  deploy:
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+          path: |
+            data/
+          if-no-files-found: warn

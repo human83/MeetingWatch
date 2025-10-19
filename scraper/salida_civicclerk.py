@@ -1,3 +1,7 @@
+from datetime import date
+
+SALIDA_DEBUG = os.getenv('SALIDA_DEBUG', '0') == '1'
+AGENDA_KEYWORDS = ('agenda', 'packet')
 # scraper/salida_civicclerk.py
 from __future__ import annotations
 
@@ -169,12 +173,36 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
             continue
 
         title = _extract_title_from_bs4(tag) or "Meeting"
-        out.append({
+        
+# Skip past dates (keep today and future)
+try:
+    today_iso = date.today().isoformat()
+    if iso < today_iso:
+        if SALIDA_DEBUG:
+            print(f"[salida] Skip past date {iso} for {full}")
+        continue
+except Exception:
+    pass
+
+# Prefer a direct agenda/packet PDF when possible
+final_url = full
+try:
+    if not final_url.lower().endswith(".pdf"):
+        if any(k in final_url.lower() for k in ("meeting", "agenda", "packet")):
+            pdf = _find_agenda_pdf(final_url)
+            if pdf:
+                if SALIDA_DEBUG:
+                    print(f"[salida] Resolved agenda PDF for tile: {final_url} -> {pdf}")
+                final_url = pdf
+except Exception:
+    pass
+
+out.append({
             "city": CITY_NAME,
             "provider": PROVIDER,
             "title": title,
             "date": iso,
-            "url": full,
+            "url": final_url,
             "source": source_url,
         })
     return out
@@ -344,3 +372,28 @@ def parse_salida() -> List[Dict]:
 
 if __name__ == "__main__":  # pragma: no cover
     print(json.dumps(parse_salida(), indent=2))
+
+
+def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
+    """Try to find an agenda/packet PDF on a meeting page and return absolute URL or None."""
+    try:
+        if soup is None:
+            soup = _get_soup(source_url)
+        if not soup:
+            return None
+
+        # Prefer links that look like agendas/packets and end with .pdf
+        for a in soup.select("a[href$='.pdf'], a[href*='Agenda' i][href], a[href*='Packet' i][href]"):
+            href = (a.get("href") or "").strip()
+            text = _extract_text(a).lower()
+            h = href.lower()
+            if '.pdf' in h and (any(k in h for k in AGENDA_KEYWORDS) or any(k in text for k in AGENDA_KEYWORDS)):
+                return _normalize(source_url, href)
+
+        # Fallback: any PDF on the page
+        a = soup.select_one("a[href$='.pdf']")
+        if a and a.get("href"):
+            return _normalize(source_url, a.get("href"))
+    except Exception:
+        pass
+    return None

@@ -71,28 +71,59 @@ jobs:
           python -m scraper.main
           test -d data && ls -la data || (echo "no data dir generated" && exit 1)
 
-      # === Summarization step (produces the bullets) ===
-      - name: Summarize agendas (GPT)
+       # === Summarization step (produces the bullets) ===
+      - name: Summarize agendas (GPT, fresh & verbose)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_LOG: debug            # surface SDK errors
+          PYTHONWARNINGS: default
+          PDF_SUMMARY_DEBUG: "1"
         run: |
-          # Try explicit CLI first; ignore failure, then try module fallback
-          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries || true
-          python -m scraper.summarize || true
-          echo "---- agenda_summaries ----"
+          set -euo pipefail
+          # show how many meetings have any doc-like URLs the summarizer could use
+          python - <<'PY'
+          import json, sys
+          path = "data/meetings.json"
+          with open(path, "r") as f:
+            items = json.load(f)
+          def has_doc(x):
+            keys = ("agenda_url","agenda_pdf","packet_url","packet_pdf","attachments","documents")
+            return any(k in x and x[k] for k in keys)
+          n_with_docs = sum(1 for x in items if has_doc(x))
+          print(f"[diagnostic] meetings total={len(items)} with_docs={n_with_docs}")
+          if n_with_docs == 0:
+            print("[diagnostic] None of the meetings have document links; summarizer will produce empty outputs.", file=sys.stderr)
+          PY
+
+          # start clean to avoid picking up stale stubs
+          rm -rf data/cache/agenda_summaries
+          mkdir -p data/cache/agenda_summaries
+
+          # Try explicit CLI first (fresh run); if your module supports flags like --no-cache, add them here.
+          # If that command isn't implemented, fall back to default module run.
+          ( python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries ) || true
+          ( python -m scraper.summarize ) || true
+
+          echo "---- agenda_summaries (ls) ----"
           ls -la data/cache/agenda_summaries || true
+
+          echo "---- sample outputs (head) ----"
+          for f in $(ls -1 data/cache/agenda_summaries/*.json 2>/dev/null | head -n 3); do
+            echo ">>> $f"
+            head -c 600 "$f" || true
+            echo
+            echo "-----"
+          done
+
+          echo "---- grep for errors ----"
+          (grep -Hni '"error"\|"exception"\|"traceback"' data/cache/agenda_summaries/*.json || true)
 
       - name: "Sanity check: did we produce any bullets?"
         run: |
-          # Count JSON files that contain a "bullets" field
+          set -e
           n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)
           echo "Files with bullets: ${n}"
-          if [ "${n}" -gt 0 ]; then
-            exit 0
-          else
-            echo "No bullets produced by summarizer." >&2
-            exit 1
-          fi
+          test "${n}" -gt 0
 
       - name: Upload data artifact
         uses: actions/upload-artifact@v4

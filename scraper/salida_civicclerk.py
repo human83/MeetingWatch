@@ -1,14 +1,10 @@
-from datetime import date
-
-SALIDA_DEBUG = os.getenv('SALIDA_DEBUG', '0') == '1'
-AGENDA_KEYWORDS = ('agenda', 'packet')
 # scraper/salida_civicclerk.py
 from __future__ import annotations
 
 import os
 import re
 import json
-import traceback
+from datetime import date
 from urllib.parse import urljoin, urlparse
 from typing import List, Dict, Optional, Tuple, Iterable, Set
 
@@ -22,27 +18,36 @@ try:
 except Exception:  # pragma: no cover
     sync_playwright = None
 
+# ---------- configuration ----------
 CITY_NAME = "Salida"
 PROVIDER = "CivicClerk"
 
-# Base host can be overridden in CI:
-SALIDA_BASE_URL = os.getenv("SALIDA_CIVICCLERK_URL", "https://salida.civicclerk.com").rstrip("/")
+# Base host can be overridden in CI
+SALIDA_BASE_URL = os.getenv(
+    "SALIDA_CIVICCLERK_URL", "https://salidaco.civicclerk.com"
+).rstrip("/")
 
-# You can pass alternates e.g.: SALIDA_CIVICCLERK_ALT_HOSTS="https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com"
-ALT_HOSTS: List[str] = [h.strip().rstrip("/") for h in os.getenv("SALIDA_CIVICCLERK_ALT_HOSTS", "").split(",") if h.strip()]
-
-ENTRY_PATHS = [
-    "/", "/Meetings", "/en-US/Meetings", "/en/Meetings", "/en-US", "/en",
+# Optional alternates, comma-separated
+ALT_HOSTS: List[str] = [
+    h.strip().rstrip("/")
+    for h in os.getenv("SALIDA_CIVICCLERK_ALT_HOSTS", "").split(",")
+    if h.strip()
 ]
 
+# Entry points to try on each host
+ENTRY_PATHS = ["/", "/Meetings", "/en-US/Meetings", "/en/Meetings", "/en-US", "/en"]
+
+# How aggressive to be when scanning pages
 MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "120"))
 MAX_DISCOVERY_PAGES = int(os.getenv("CIVICCLERK_MAX_DISCOVERY", "20"))
 
-# ------------------ date parsing ------------------
+SALIDA_DEBUG = os.getenv("SALIDA_DEBUG", "0") == "1"
+AGENDA_KEYWORDS = ("agenda", "packet")
 
-_ORDINAL_RE = re.compile(r'(\d+)(st|nd|rd|th)\b', flags=re.I)
+# ---------- date helpers ----------
 
-# very tolerant date tokens: "Oct 23, 2025", "Wednesday, Oct 23, 2025 at 6:00 PM", "10/23/2025 6:00 PM"
+_ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", flags=re.I)
+# tolerant date: "Oct 23, 2025", "Wed, Oct 23, 2025 at 6:00 PM", "10/23/2025 6:00 PM"
 _FALLBACK_DATE_GUESS = re.compile(
     r"(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*,?\s*)?"
     r"([A-Za-z]{3,9}|\d{1,2})[\/\-\s.,]+(\d{1,2})[\/\-\s.,]+(\d{2,4})"
@@ -50,8 +55,10 @@ _FALLBACK_DATE_GUESS = re.compile(
     re.I,
 )
 
+
 def _clean(s: Optional[str]) -> str:
     return " ".join((s or "").split())
+
 
 def _parse_date(text: str) -> Optional[str]:
     if not text:
@@ -69,13 +76,13 @@ def _parse_date(text: str) -> Optional[str]:
                 return None
         return None
 
-# ------------------ HTML helpers ------------------
+
+# ---------- HTML helpers ----------
 
 LIKELY_TILE_SEL = "[role='link'], a.meeting, .meeting, .tile, .card, article, li"
 LIKELY_TIME_CHILDREN = "time[datetime], time, .meeting-date, .date, [data-date], [data-start]"
-LIKELY_LINKS = "a[href*='Meeting'], a[href*='meeting'], a[href*='Agenda'], a[href*='agenda'], a[href]"
-
 PRI_WORDS = ("meeting", "agenda", "packet", "council", "board", "commission")
+
 
 def _same_site(base: str, href: str) -> bool:
     try:
@@ -85,10 +92,12 @@ def _same_site(base: str, href: str) -> bool:
     except Exception:
         return True
 
+
 def _normalize(base: str, href: str) -> str:
     if not href:
         return base
     return urljoin(base + "/", href)
+
 
 def _extract_text(tag) -> str:
     try:
@@ -96,12 +105,14 @@ def _extract_text(tag) -> str:
     except Exception:
         return ""
 
+
 def _first_attr(tag, *names) -> Optional[str]:
     for n in names:
         v = tag.get(n)
         if v and str(v).strip():
             return _clean(str(v))
     return None
+
 
 def _extract_date_text_from_bs4(tag) -> Optional[str]:
     # children first
@@ -124,6 +135,7 @@ def _extract_date_text_from_bs4(tag) -> Optional[str]:
         return a
     return None
 
+
 def _extract_title_from_bs4(tag) -> Optional[str]:
     for sel in ("h1", "h2", "h3", "h4", ".meeting-title", ".title", "a", "[role='link']"):
         try:
@@ -137,11 +149,38 @@ def _extract_title_from_bs4(tag) -> Optional[str]:
     t = _extract_text(tag)
     return t or None
 
+
+def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
+    """Try to find an agenda/packet PDF on a meeting page and return absolute URL or None."""
+    try:
+        if soup is None:
+            soup = _get_soup(source_url)
+        if not soup:
+            return None
+
+        # Prefer links that look like agendas/packets and end with .pdf
+        for a in soup.select("a[href$='.pdf'], a[href*='Agenda' i][href], a[href*='Packet' i][href]"):
+            href = (a.get("href") or "").strip()
+            text = _extract_text(a).lower()
+            h = href.lower()
+            if ".pdf" in h and (any(k in h for k in AGENDA_KEYWORDS) or any(k in text for k in AGENDA_KEYWORDS)):
+                return _normalize(source_url, href)
+
+        # Fallback: any PDF on the page
+        a = soup.select_one("a[href$='.pdf']")
+        if a and a.get("href"):
+            return _normalize(source_url, a.get("href"))
+    except Exception:
+        pass
+    return None
+
+
 def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
     out: List[Dict] = []
     tiles = soup.select(LIKELY_TILE_SEL)
     if not tiles:
         tiles = soup.select("a, article, li, div")
+
     for tag in tiles[:MAX_TILES]:
         # try to find a link first
         href_tag = None
@@ -152,6 +191,7 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
                 break
         if not href_tag:
             href_tag = tag.select_one("a[href]")
+
         href = href_tag.get("href") if href_tag else None
         if not href:
             continue
@@ -168,46 +208,50 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
                     break
         if not iso:
             # Still nothing; skip but log once per page
-            # (stdout is fine in CI)
-            print(f"[salida] Skip tile (no date): {full}")
+            if SALIDA_DEBUG:
+                print(f"[salida] Skip tile (no date): {full}")
             continue
 
-        title = _extract_title_from_bs4(tag) or "Meeting"
-        
-# Skip past dates (keep today and future)
-try:
-    today_iso = date.today().isoformat()
-    if iso < today_iso:
-        if SALIDA_DEBUG:
-            print(f"[salida] Skip past date {iso} for {full}")
-        continue
-except Exception:
-    pass
-
-# Prefer a direct agenda/packet PDF when possible
-final_url = full
-try:
-    if not final_url.lower().endswith(".pdf"):
-        if any(k in final_url.lower() for k in ("meeting", "agenda", "packet")):
-            pdf = _find_agenda_pdf(final_url)
-            if pdf:
+        # Skip past dates (keep today and future)
+        try:
+            if iso < date.today().isoformat():
                 if SALIDA_DEBUG:
-                    print(f"[salida] Resolved agenda PDF for tile: {final_url} -> {pdf}")
-                final_url = pdf
-except Exception:
-    pass
+                    print(f"[salida] Skip past date {iso} for {full}")
+                continue
+        except Exception:
+            pass
 
-out.append({
-            "city": CITY_NAME,
-            "provider": PROVIDER,
-            "title": title,
-            "date": iso,
-            "url": final_url,
-            "source": source_url,
-        })
+        title = _extract_title_from_bs4(tag) or "Meeting"
+
+        # Prefer a direct agenda/packet PDF when possible
+        final_url = full
+        try:
+            if not final_url.lower().endswith(".pdf") and any(
+                k in final_url.lower() for k in ("meeting", "agenda", "packet")
+            ):
+                pdf = _find_agenda_pdf(final_url)
+                if pdf:
+                    if SALIDA_DEBUG:
+                        print(f"[salida] Resolved agenda PDF for tile: {final_url} -> {pdf}")
+                    final_url = pdf
+        except Exception:
+            pass
+
+        out.append(
+            {
+                "city": CITY_NAME,
+                "provider": PROVIDER,
+                "title": title,
+                "date": iso,
+                "url": final_url,
+                "source": source_url,
+            }
+        )
+
     return out
 
-# ------------------ requests path ------------------
+
+# ---------- requests path ----------
 
 def _get_soup(url: str) -> Optional[BeautifulSoup]:
     try:
@@ -219,6 +263,7 @@ def _get_soup(url: str) -> Optional[BeautifulSoup]:
     except Exception as e:
         print(f"[salida] requests error {url}: {e}")
         return None
+
 
 def _requests_candidates(url: str) -> List[Dict]:
     soup = _get_soup(url)
@@ -258,12 +303,14 @@ def _requests_candidates(url: str) -> List[Dict]:
 
     return results
 
-# ------------------ playwright path ------------------
+
+# ---------- playwright path ----------
 
 def _playwright_candidates(entry_url: str) -> List[Dict]:
     out: List[Dict] = []
     if sync_playwright is None:
         return out
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         try:
@@ -274,13 +321,7 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
             page.goto(entry_url, wait_until="networkidle")
 
             # Try common SPA containers before scanning
-            for sel in [
-                "main",
-                "#root",
-                "[role='main']",
-                ".meetings",
-                ".agenda",
-            ]:
+            for sel in ["main", "#root", "[role='main']", ".meetings", ".agenda"]:
                 try:
                     page.locator(sel).first.wait_for(timeout=2000)
                     break
@@ -328,7 +369,8 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
             browser.close()
     return out
 
-# ------------------ public API ------------------
+
+# ---------- public API ----------
 
 def _hosts_to_try() -> Iterable[str]:
     tried = [SALIDA_BASE_URL] + ALT_HOSTS
@@ -338,6 +380,7 @@ def _hosts_to_try() -> Iterable[str]:
         if h and h not in seen:
             seen.add(h)
             yield h
+
 
 def parse_salida() -> List[Dict]:
     tried_urls: List[str] = []
@@ -370,30 +413,6 @@ def parse_salida() -> List[Dict]:
     print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
     return unique
 
+
 if __name__ == "__main__":  # pragma: no cover
     print(json.dumps(parse_salida(), indent=2))
-
-
-def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
-    """Try to find an agenda/packet PDF on a meeting page and return absolute URL or None."""
-    try:
-        if soup is None:
-            soup = _get_soup(source_url)
-        if not soup:
-            return None
-
-        # Prefer links that look like agendas/packets and end with .pdf
-        for a in soup.select("a[href$='.pdf'], a[href*='Agenda' i][href], a[href*='Packet' i][href]"):
-            href = (a.get("href") or "").strip()
-            text = _extract_text(a).lower()
-            h = href.lower()
-            if '.pdf' in h and (any(k in h for k in AGENDA_KEYWORDS) or any(k in text for k in AGENDA_KEYWORDS)):
-                return _normalize(source_url, href)
-
-        # Fallback: any PDF on the page
-        a = soup.select_one("a[href$='.pdf']")
-        if a and a.get("href"):
-            return _normalize(source_url, a.get("href"))
-    except Exception:
-        pass
-    return None

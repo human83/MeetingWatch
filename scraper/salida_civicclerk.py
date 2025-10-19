@@ -22,24 +22,20 @@ except Exception:  # pragma: no cover
 CITY_NAME = "Salida"
 PROVIDER = "CivicClerk"
 
-# Base host can be overridden in CI
 SALIDA_BASE_URL = os.getenv(
     "SALIDA_CIVICCLERK_URL", "https://salidaco.civicclerk.com"
 ).rstrip("/")
 
-# Optional alternates, comma-separated
 ALT_HOSTS: List[str] = [
     h.strip().rstrip("/")
     for h in os.getenv("SALIDA_CIVICCLERK_ALT_HOSTS", "").split(",")
     if h.strip()
 ]
 
-# Entry points to try on each host
 ENTRY_PATHS = ["/", "/Meetings", "/en-US/Meetings", "/en/Meetings", "/en-US", "/en"]
 
-# How aggressive to be when scanning pages
-MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "120"))
-MAX_DISCOVERY_PAGES = int(os.getenv("CIVICCLERK_MAX_DISCOVERY", "20"))
+MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "160"))
+MAX_DISCOVERY_PAGES = int(os.getenv("CIVICCLERK_MAX_DISCOVERY", "25"))
 
 SALIDA_DEBUG = os.getenv("SALIDA_DEBUG", "0") == "1"
 AGENDA_KEYWORDS = ("agenda", "packet")
@@ -47,7 +43,6 @@ AGENDA_KEYWORDS = ("agenda", "packet")
 # ---------- date helpers ----------
 
 _ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", flags=re.I)
-# tolerant date: "Oct 23, 2025", "Wed, Oct 23, 2025 at 6:00 PM", "10/23/2025 6:00 PM"
 _FALLBACK_DATE_GUESS = re.compile(
     r"(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*,?\s*)?"
     r"([A-Za-z]{3,9}|\d{1,2})[\/\-\s.,]+(\d{1,2})[\/\-\s.,]+(\d{2,4})"
@@ -79,9 +74,14 @@ def _parse_date(text: str) -> Optional[str]:
 
 # ---------- HTML helpers ----------
 
-LIKELY_TILE_SEL = "[role='link'], a.meeting, .meeting, .tile, .card, article, li"
+LIKELY_TILE_SEL = "[role='link'], a.meeting, .meeting, .tile, .card, article, li, .Row, .ListItem"
 LIKELY_TIME_CHILDREN = "time[datetime], time, .meeting-date, .date, [data-date], [data-start]"
 PRI_WORDS = ("meeting", "agenda", "packet", "council", "board", "commission")
+
+_ONCLICK_URL_RE = re.compile(
+    r"""(?:location(?:\.href)?|window\.location(?:\.href)?)\s*=\s*(['"])(.+?)\1""",
+    re.I,
+)
 
 
 def _same_site(base: str, href: str) -> bool:
@@ -115,7 +115,6 @@ def _first_attr(tag, *names) -> Optional[str]:
 
 
 def _extract_date_text_from_bs4(tag) -> Optional[str]:
-    # children first
     for sel in LIKELY_TIME_CHILDREN.split(","):
         sel = sel.strip()
         try:
@@ -129,7 +128,6 @@ def _extract_date_text_from_bs4(tag) -> Optional[str]:
             txt = _extract_text(found)
             if txt:
                 return txt
-    # tile attrs
     a = _first_attr(tag, "aria-label", "title", "data-date", "data-start")
     if a:
         return a
@@ -148,6 +146,46 @@ def _extract_title_from_bs4(tag) -> Optional[str]:
                 return t
     t = _extract_text(tag)
     return t or None
+
+
+def _extract_meeting_href(tag) -> Optional[str]:
+    """
+    CivicClerk often renders:
+      - <a href="#"> with data-href/data-url/data-link
+      - <div onclick="location.href='/en/Meetings/Details/...'">
+    This extracts the *real* target when present.
+    """
+    # 1) direct anchor with a usable href
+    for a in tag.select("a[href]"):
+        href = (a.get("href") or "").strip()
+        if not href:
+            continue
+        bad = href == "#" or href.lower().startswith("javascript:")
+        if bad:
+            # try data-* on the anchor
+            via_data = a.get("data-href") or a.get("data-url") or a.get("data-link")
+            if via_data:
+                return via_data.strip()
+            # or onclick on the anchor
+            onclick = a.get("onclick") or ""
+            m = _ONCLICK_URL_RE.search(onclick)
+            if m:
+                return m.group(2).strip()
+            continue
+        return href
+
+    # 2) any element with data-* pointing to a url
+    data = _first_attr(tag, "data-href", "data-url", "data-link")
+    if data:
+        return data
+
+    # 3) onclick='location.href="..."'
+    onclick = tag.get("onclick") or ""
+    m = _ONCLICK_URL_RE.search(onclick)
+    if m:
+        return m.group(2).strip()
+
+    return None
 
 
 def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
@@ -182,32 +220,25 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
         tiles = soup.select("a, article, li, div")
 
     for tag in tiles[:MAX_TILES]:
-        # try to find a link first
-        href_tag = None
-        for a in tag.select("a[href]"):
-            href = a.get("href") or ""
-            if any(k in href.lower() for k in ("meeting", "agenda", "packet")):
-                href_tag = a
-                break
-        if not href_tag:
-            href_tag = tag.select_one("a[href]")
-
-        href = href_tag.get("href") if href_tag else None
-        if not href:
+        # find the real target url (handle data-* and onclick)
+        raw_target = _extract_meeting_href(tag)
+        if not raw_target:
             continue
-        full = _normalize(source_url, href)
+
+        full = _normalize(source_url, raw_target)
+        # ignore if it resolves back to the same page root
+        if full.rstrip("/") in (source_url.rstrip("/"), urljoin(source_url + "/", "#").rstrip("/")):
+            continue
 
         dt_text = _extract_date_text_from_bs4(tag) or _extract_text(tag)
         iso = _parse_date(dt_text)
         if not iso:
-            # fall back: look for a nearby time element anywhere on page
-            times = soup.select("time[datetime], time")
-            for tm in times:
+            # fallback: scan <time> elsewhere
+            for tm in soup.select("time[datetime], time"):
                 iso = _parse_date(_first_attr(tm, "datetime") or _extract_text(tm) or "")
                 if iso:
                     break
         if not iso:
-            # Still nothing; skip but log once per page
             if SALIDA_DEBUG:
                 print(f"[salida] Skip tile (no date): {full}")
             continue
@@ -226,13 +257,11 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
         # Prefer a direct agenda/packet PDF when possible
         final_url = full
         try:
-            if not final_url.lower().endswith(".pdf") and any(
-                k in final_url.lower() for k in ("meeting", "agenda", "packet")
-            ):
+            if not final_url.lower().endswith(".pdf"):
                 pdf = _find_agenda_pdf(final_url)
                 if pdf:
                     if SALIDA_DEBUG:
-                        print(f"[salida] Resolved agenda PDF for tile: {final_url} -> {pdf}")
+                        print(f"[salida] Resolved agenda PDF: {final_url} -> {pdf}")
                     final_url = pdf
         except Exception:
             pass
@@ -273,15 +302,28 @@ def _requests_candidates(url: str) -> List[Dict]:
     if out:
         return out
 
-    # If no tiles, do discovery on this page: collect promising links, visit a few, scan again
+    # Discovery: collect promising links, visit a few, scan again
     links: List[str] = []
-    for a in soup.select("a[href]"):
-        href = a.get("href") or ""
+    for a in soup.select("a[href], [onclick], [data-href], [data-url], [data-link]"):
+        href = (a.get("href") or "").strip()
         text = _extract_text(a)
-        h = href.lower()
+        data = a.get("data-href") or a.get("data-url") or a.get("data-link")
+        onclick = a.get("onclick") or ""
+        target = None
+        if href and href != "#" and not href.lower().startswith("javascript:"):
+            target = href
+        elif data:
+            target = data
+        else:
+            m = _ONCLICK_URL_RE.search(onclick)
+            if m:
+                target = m.group(2)
+        if not target:
+            continue
+        h = (target or "").lower()
         t = text.lower()
         if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
-            full = _normalize(url, href)
+            full = _normalize(url, target)
             if _same_site(url, full):
                 links.append(full)
 
@@ -321,30 +363,43 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
             page.goto(entry_url, wait_until="networkidle")
 
             # Try common SPA containers before scanning
-            for sel in ["main", "#root", "[role='main']", ".meetings", ".agenda"]:
+            for sel in ["main", "#root", "[role='main']", ".meetings", ".agenda", ".List"]:
                 try:
                     page.locator(sel).first.wait_for(timeout=2000)
                     break
                 except Exception:
                     pass
 
-            # Collect promising onsite links for discovery
+            # Collect promising links for discovery (including onclick/data-* cases)
             candidates: List[str] = []
-            anchors = page.locator("a[href]").all()
+            anchors = page.locator("a, [onclick], [data-href], [data-url], [data-link]").all()
             for a in anchors:
                 try:
-                    href = a.get_attribute("href") or ""
+                    href = (a.get_attribute("href") or "").strip()
                     text = (a.text_content() or "").strip()
-                    h = href.lower()
+                    data = a.get_attribute("data-href") or a.get_attribute("data-url") or a.get_attribute("data-link")
+                    onclick = a.get_attribute("onclick") or ""
+                    target = None
+                    if href and href != "#" and not href.lower().startswith("javascript:"):
+                        target = href
+                    elif data:
+                        target = data
+                    else:
+                        m = _ONCLICK_URL_RE.search(onclick or "")
+                        if m:
+                            target = m.group(2)
+                    if not target:
+                        continue
+                    h = (target or "").lower()
                     t = text.lower()
                     if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
-                        full = _normalize(entry_url, href)
+                        full = _normalize(entry_url, target)
                         if _same_site(entry_url, full):
                             candidates.append(full)
                 except Exception:
                     pass
 
-            # Also scan current page for tiles
+            # Scan current page
             html = page.content()
             soup = BeautifulSoup(html, "html.parser")
             out.extend(_scan_tiles_bs4(soup, entry_url))
@@ -374,7 +429,6 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
 
 def _hosts_to_try() -> Iterable[str]:
     tried = [SALIDA_BASE_URL] + ALT_HOSTS
-    # Remove duplicates while preserving order
     seen: Set[str] = set()
     for h in tried:
         if h and h not in seen:

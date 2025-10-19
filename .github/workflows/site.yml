@@ -77,26 +77,27 @@ jobs:
       # --- Summarize agendas (this generates the bullets) ---
       - name: Summarize agendas (GPT)
         env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}  # ok to keep; overrides top-level if needed
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          SUMMARIZER_MODEL: ${{ env.SUMMARIZER_MODEL }}
+          PDF_SUMMARY_DEBUG: '1'
         run: |
-          # Try explicit CLI first; ignore failure, then try module fallback
-          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries || true
-          python -m scraper.summarize || true
-          echo "---- agenda_summaries ----"
+          set -euxo pipefail
+          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries
+
+          echo "---- agenda_summaries (ls) ----"
           ls -la data/cache/agenda_summaries || true
 
-      # Optional: warn/fail if no bullets yet (remove continue-on-error later)
-      - name: "Sanity check: did we produce any bullets?"
-        continue-on-error: true
+          echo "---- any meta errors ----"
+          (grep -Hn '"error"' data/cache/agenda_summaries/*.meta.json || true)
+
+          echo "---- sample meta ----"
+          head -n 80 $(ls data/cache/agenda_summaries/*.meta.json | head -n1) || true
+
+      - name: Sanity check: did we produce any bullets?
         run: |
           n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)
           echo "Files with bullets: ${n}"
-          if [ "${n}" -gt 0 ]; then
-            exit 0
-          else
-            echo "No bullets produced by summarizer." >&2
-            exit 1
-          fi    
+          test "${n}" -gt 0
 
       - name: Upload data artifact (data/)
         uses: actions/upload-artifact@v4

@@ -3,7 +3,7 @@ name: Build site
 on:
   workflow_dispatch:
   schedule:
-    - cron: "0 * * * *"   # hourly; tweak as you like
+    - cron: "0 * * * *"       # hourly; adjust as needed
   push:
     branches: [ main ]
 
@@ -71,36 +71,29 @@ jobs:
           python -m scraper.main
           test -d data && ls -la data || (echo "no data dir generated" && exit 1)
 
-      # 🔽 THIS is the missing piece
+      # --- Summarization step (this is what produces the bullets) ---
       - name: Summarize agendas (GPT)
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          # Try with explicit args; if the module has no CLI, fall back to default
-          python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries || \
-          python -m scraper.summarize
-          # show what we built
+          ( python -m scraper.summarize --input data/meetings.json --out data/cache/agenda_summaries ) || python -m scraper.summarize
           echo "---- agenda_summaries ----"
           ls -la data/cache/agenda_summaries || true
 
       - name: Sanity check: did we produce any bullets?
         run: |
-          python - <<'PY'
-          import json, os, glob, sys
-          bullets = 0
-          for p in glob.glob("data/cache/agenda_summaries/*.json"):
-            try:
-              obj = json.load(open(p))
-              if obj.get("bullets"): bullets += 1
-            except Exception: pass
-          print(f"Found {bullets} items with bullets")
-          sys.exit(0 if bullets > 0 else 1)
-          PY
+          python -c "import json,glob,sys; b=0
+for p in glob.glob('data/cache/agenda_summaries/*.json'):
+    try:
+        obj=json.load(open(p))
+        b+=1 if obj.get('bullets') else 0
+    except Exception:
+        pass
+print(f'Found {b} items with bullets'); sys.exit(0 if b>0 else 1)"
 
       - name: Upload data artifact
         uses: actions/upload-artifact@v4
         with:
           name: scrape-data
-          path: |
-            data/
+          path: data/
           if-no-files-found: warn

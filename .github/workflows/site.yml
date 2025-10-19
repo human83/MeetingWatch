@@ -86,7 +86,7 @@ jobs:
           ls -la data/cache/agenda_summaries || true
 
       # Optional: warn/fail if no bullets yet (remove continue-on-error later)
-      - name: Sanity check: did we produce any bullets?
+      - name: "Sanity check: did we produce any bullets?"
         continue-on-error: true
         run: |
           n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)

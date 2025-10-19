@@ -93,7 +93,7 @@ jobs:
           echo "---- sample meta ----"
           head -n 80 $(ls data/cache/agenda_summaries/*.meta.json | head -n1) || true
 
-      - name: Sanity check: did we produce any bullets?
+      - name: Sanity check: did we produce any bullets
         run: |
           n=$(grep -l '"bullets"' data/cache/agenda_summaries/*.json 2>/dev/null | wc -l || true)
           echo "Files with bullets: ${n}"

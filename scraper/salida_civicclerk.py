@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from urllib.parse import urlparse, urlunparse
+import requests
 import time
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -252,67 +254,82 @@ def _derive_files_page(url: str) -> Optional[str]:
     base = url.split("/event/")[0].rstrip("/")
     return f"{base}/event/{event_id}/files"
 
+def _ensure_portal_host(u: str) -> str:
+    """
+    CivicClerk has both tenant.civicclerk.com (legacy) and tenant.portal.civicclerk.com (new).
+    The agenda ‘files’ pages live on the *portal* host. Normalize to that.
+    """
+    try:
+        p = urlparse(u)
+        host = p.netloc
+        if host.endswith(".portal.civicclerk.com"):
+            return u  # already portal
+        if host.endswith(".civicclerk.com"):
+            # turn salidaco.civicclerk.com -> salidaco.portal.civicclerk.com
+            parts = host.split(".")
+            if len(parts) >= 3:
+                parts.insert(-2, "portal")
+                new_host = ".".join(parts)
+                p = p._replace(netloc=new_host)
+                return urlunparse(p)
+    except Exception:
+        pass
+    return u
+
+def _tenant_from_host(u: str) -> str:
+    """
+    Extracts the subdomain tenant (e.g., 'salidaco') from *.portal.civicclerk.com or *.civicclerk.com.
+    """
+    host = urlparse(u).netloc
+    parts = host.split(".")
+    # e.g., salidaco.portal.civicclerk.com  -> tenant = salidaco
+    #       salidaco.civicclerk.com        -> tenant = salidaco
+    return parts[0] if parts else "salidaco"
 
 def find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
     """
-    Try to find an agenda/packet PDF for a CivicClerk meeting page and return its absolute URL.
-    This version handles SPA behavior by using Playwright and capturing the API stream URL.
+    For Salida/CivicClerk, the visible ‘Agenda’/‘Agenda Packet’ buttons do not expose direct .pdf <a> tags.
+    The viewer makes an XHR to:
+        https://{tenant}.api.civicclerk.com/v1/Meetings/GetMeetingFileStream(fileId=<ID>,plainText=false)
+    We:
+      1) Normalize to the portal host (…portal.civicclerk.com) if we weren't already there.
+      2) Load the page HTML (if soup not provided).
+      3) Look for /files/agenda/<fileId> in the HTML (the viewer pages include it).
+      4) Build and return the API URL using that fileId.
+    Returns None if we can’t find a fileId.
     """
-    # If we were accidentally given a direct file/agenda route, short-circuit:
-    if "GetMeetingFileStream" in source_url:
-        return source_url
+    try:
+        normalized = _ensure_portal_host(source_url)
 
-    files_url = _derive_files_page(source_url) or source_url
-
-    # Final guard: must be a CivicClerk tenant we understand
-    tenant = _tenant_from_host(files_url)
-    if not tenant:
-        return None
-
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True, args=["--no-sandbox"])
-        ctx = browser.new_context()
-        page = ctx.new_page()
-        try:
-            page.goto(files_url, wait_until="domcontentloaded", timeout=30000)
-            # Wait just a bit for client rendering to finish
-            page.wait_for_timeout(1200)
-
-            # Try to click the exact “Agenda Packet (PDF)” item and sniff the API call
-            url = _click_and_sniff_pdf_api(page, menu_text="Agenda Packet (PDF)")
-            if url:
-                return url
-
-            # Fallback: some tenants label it simply “Agenda (PDF)”
-            url = _click_and_sniff_pdf_api(page, menu_text="Agenda (PDF)")
-            if url:
-                return url
-
-            # Last resort: if a plain-text variant exists we can still summarize text
-            # (not perfect, but keeps us from returning nothing)
+        # If caller didn't pass soup, fetch and build it.
+        if soup is None:
             try:
-                page.get_by_text("Agenda Packet (Plain Text)", exact=True).first.click(timeout=2000)
-                # Look for any request that returns text/plain
-                captured: Optional[str] = None
-
-                def _on_resp_plain(resp: Response):
-                    nonlocal captured
-                    if "text/plain" in (resp.headers.get("content-type", "").lower()):
-                        captured = resp.url
-
-                page.on("response", _on_resp_plain)
-                for _ in range(25):
-                    if captured:
-                        return captured
-                    page.wait_for_timeout(160)
+                r = requests.get(normalized, timeout=20)
+                if r.status_code != 200:
+                    return None
+                html = r.text
+                soup = BeautifulSoup(html, "html.parser")
             except Exception:
-                pass
+                return None
 
+        # Strategy A: find /files/agenda/<id> in current page URL (works if we're already on /files/agenda/####)
+        m = re.search(r"/files/agenda/(\d+)", normalized)
+        if not m:
+            # Strategy B: scan the HTML for any /files/agenda/<id> occurrences
+            # The left panel / viewer pages usually include these paths.
+            html = soup.decode() if hasattr(soup, "decode") else str(soup)
+            m = re.search(r"/files/agenda/(\d+)", html)
+
+        if not m:
             return None
-        finally:
-            ctx.close()
-            browser.close()
 
+        file_id = m.group(1)
+        tenant = _tenant_from_host(normalized)
+        api_url = f"https://{tenant}.api.civicclerk.com/v1/Meetings/GetMeetingFileStream(fileId={file_id},plainText=false)"
+        return api_url
+    except Exception:
+        return None
+   
 
 # ----------------------------
 # Dev/test hook

@@ -358,6 +358,8 @@ def parse_salida() -> List[Dict]:
     tried_urls: List[str] = []
     discovered: List[Dict] = []
 
+    print('[salida] parse_salida starting; hosts:', ', '.join(list(_hosts_to_try())))
+
     # Crawl likely entry points; prefer Playwright
     for host in _hosts_to_try():
         for path in ENTRY_PATHS:
@@ -401,9 +403,8 @@ def parse_salida() -> List[Dict]:
         if txt:
             m["agenda_text_url"] = txt
 
-    if SALIDA_DEBUG:
-        with_pdf = sum(1 for x in unique if x.get("agenda_url"))
-        print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items; with agenda: {with_pdf}")
+    with_pdf = sum(1 for x in unique if x.get('agenda_url'))
+    print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items; with agenda: {with_pdf}")
 
     return unique
 

@@ -364,7 +364,7 @@ def parse_salida(entry_urls: list[str] | None = None, upcoming_only: bool = True
     if entry_urls is None:
         entry_urls = [
             "https://salida.civicclerk.com/",
-            "https://portal.salida.civicclerk.com/",
+            "https://salidaco.portal.civicclerk.com/",
         ]
     """
     Main entry. Given one or more Salida CivicClerk listing URLs, return enriched items with bullets.
@@ -448,18 +448,18 @@ def parse_salida(entry_urls: list[str] | None = None, upcoming_only: bool = True
 def _default_entry_urls() -> List[str]:
     # These are examples; replace with your actual Salida CivicClerk URLs.
     # Often index pages are like:
-    #   https://salida.civicclerk.com/ or https://portal.salida.civicclerk.com/
+    #   https://salida.civicclerk.com/ or https://salidaco.portal.civicclerk.com/
     # And/or specific meeting listing pages.
     return [
         "https://salida.civicclerk.com/",
-        "https://portal.salida.civicclerk.com/",
+        "https://salidaco.portal.civicclerk.com/,
     ]
 
 if __name__ == "__main__":
     urls = sys.argv[1:] or _default_entry_urls()
     logging.info(f"{STAGE} run started at { _now_local_iso() }")
     try:
-        items = parse_salida(["https://salida.civicclerk.com/", "https://portal.salida.civicclerk.com/",])
+        items = parse_salida(["https://salida.civicclerk.com/", "https://salidaco.portal.civicclerk.com/",])
         print(json.dumps(items, indent=2, ensure_ascii=False))
     except Exception as e:
         logging.error(f"{STAGE} fatal error: {e}")

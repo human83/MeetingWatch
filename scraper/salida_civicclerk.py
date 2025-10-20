@@ -406,3 +406,17 @@ def parse_salida() -> List[Dict]:
         print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items; with agenda: {with_pdf}")
 
     return unique
+
+
+# --- thin wrapper so generic runners can call this module ---
+# Many of our city scrapers expose a `parse()` entrypoint. Add it here
+# to keep the interface consistent with the rest of the pipeline.
+def parse():
+    return parse_salida()
+
+# Allow quick manual testing: `python salida_civicclerk.py`
+if __name__ == "__main__":
+    items = parse_salida()
+    print(f"[salida] parse() produced {len(items)} items")
+    for m in items[:5]:
+        print(" -", m.get("date"), m.get("title"), "->", m.get("url"))

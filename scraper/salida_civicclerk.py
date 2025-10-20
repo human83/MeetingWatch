@@ -360,7 +360,12 @@ def _gather_event_links(playwright, entry_urls: List[str], max_pages: int = 3) -
     browser.close()
     return sorted(links)
 
-def parse_salida(entry_urls: List[str], upcoming_only: bool = True, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+def parse_salida(entry_urls: list[str] | None = None, upcoming_only: bool = True, limit: int | None = None) -> list[dict]:
+    if entry_urls is None:
+        entry_urls = [
+            "https://salida.civicclerk.com/",
+            "https://portal.salida.civicclerk.com/",
+        ]
     """
     Main entry. Given one or more Salida CivicClerk listing URLs, return enriched items with bullets.
     """
@@ -454,7 +459,7 @@ if __name__ == "__main__":
     urls = sys.argv[1:] or _default_entry_urls()
     logging.info(f"{STAGE} run started at { _now_local_iso() }")
     try:
-        items = parse_salida(urls, upcoming_only=True, limit=25)
+        items = parse_salida(["https://salida.civicclerk.com/", "https://portal.salida.civicclerk.com/",])
         print(json.dumps(items, indent=2, ensure_ascii=False))
     except Exception as e:
         logging.error(f"{STAGE} fatal error: {e}")

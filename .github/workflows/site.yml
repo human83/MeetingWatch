@@ -24,8 +24,9 @@ jobs:
   scrape:
     runs-on: ubuntu-24.04
     env:
-      SALIDA_CIVICCLERK_URL: https://salidaco.civicclerk.com
-      SALIDA_CIVICCLERK_ALT_HOSTS: "https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com"
+      SALIDA_CIVICCLERK_URL: https://salidaco.portal.civicclerk.com
+      SALIDA_CIVICCLERK_ALT_HOSTS: https://salidaco.portal.civicclerk.com,https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4

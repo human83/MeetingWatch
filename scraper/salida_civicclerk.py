@@ -452,7 +452,7 @@ def _default_entry_urls() -> List[str]:
     # And/or specific meeting listing pages.
     return [
         "https://salida.civicclerk.com/",
-        "https://salidaco.portal.civicclerk.com/,
+        "https://salidaco.portal.civicclerk.com/",
     ]
 
 if __name__ == "__main__":

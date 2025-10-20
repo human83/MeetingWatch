@@ -21,12 +21,12 @@ from playwright.sync_api import sync_playwright, Response, TimeoutError as PWTim
 # ----------------------------
 
 # Primary and alternates can be set from workflow env
-_DEFAULT_BASE = os.getenv("SALIDA_CIVICCLERK_URL", "https://salidaco.civicclerk.com")
+_DEFAULT_BASE = os.getenv("SALIDA_CIVICCLERK_URL", "https://salidaco.portal.civicclerk.com")
 _ALT = [
     h.strip()
     for h in os.getenv(
         "SALIDA_CIVICCLERK_ALT_HOSTS",
-        "https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com,https://salidaco.portal.civicclerk.com",
+        "https://salidaco.portal.civicclerk.com,https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com",
     ).split(",")
     if h.strip()
 ]

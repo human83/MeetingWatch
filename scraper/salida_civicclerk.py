@@ -1,466 +1,644 @@
-
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-Salida (CivicClerk) scraper – updated to robustly fetch Agenda text and generate bullets.
-
-Key improvements:
-- Uses Playwright to open each event page (hydrated SPA) and locate the Files/Agenda link.
-- Prefers CivicClerk plaintext stream API (when available) to bypass PDF parsing entirely.
-- Falls back to fetching the PDF stream and extracting text (pdfminer.six, then PyPDF2).
-- Structured logging with clear stage tags and persistent debug fields:
-  agenda_pdf_url, agenda_text_len, summary_error.
-- Integrates with project's summarize_agenda() if available; otherwise heuristic fallback.
-- Dedupes by a stable hash (title|datetime|agenda_url) and filters to today+future by default.
-
-Drop-in expectations:
-- The main entrypoint function is `parse_salida(entry_urls: list[str], upcoming_only=True)`,
-  returning a list of dicts ready to be serialized to JSON by your pipeline.
-- If your project calls a different function name, you can just adapt the call site.
-
-Requirements:
-- Playwright (python) installed and browsers bootstrapped (e.g., `playwright install`).
-- pdfminer.six and PyPDF2 are optional but recommended for fallback.
-"""
-
+# scraper/salida_civicclerk.py
 from __future__ import annotations
 
-import io
-import re
 import os
-import sys
+import re
 import json
-import time
-import math
-import hashlib
-import logging
-import datetime as dt
-from dataclasses import dataclass, asdict
-from typing import Optional, List, Dict, Any
-import urllib.parse as urlparse
+import html
+from datetime import date
+from urllib.parse import urljoin, urlparse, parse_qs, urlsplit, unquote
+from typing import List, Dict, Optional, Tuple, Iterable, Set
 
-import requests
+import requests  # type: ignore
+from bs4 import BeautifulSoup  # type: ignore
+from dateutil import parser as _dtparser  # type: ignore
 
-# Playwright sync API
+# Playwright is optional
 try:
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
-except Exception as _e:
-    sync_playwright = None  # allow import without Playwright for tools that only lint
+    from playwright.sync_api import sync_playwright
+except Exception:  # pragma: no cover
+    sync_playwright = None
 
-# ---- Logging setup ----
-LOG_LEVEL = os.environ.get("SALIDA_LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
-    format="%(asctime)s %(levelname)s %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
+# ---------- configuration ----------
+CITY_NAME = "Salida"
+PROVIDER = "CivicClerk"
+
+SALIDA_BASE_URL = os.getenv(
+    "SALIDA_CIVICCLERK_URL", "https://salidaco.civicclerk.com"
+).rstrip("/")
+
+ALT_HOSTS: List[str] = [
+    h.strip().rstrip("/")
+    for h in os.getenv("SALIDA_CIVICCLERK_ALT_HOSTS", "").split(",")
+    if h.strip()
+]
+
+ENTRY_PATHS = ["/", "/Meetings", "/en-US/Meetings", "/en/Meetings", "/en-US", "/en"]
+
+MAX_TILES = int(os.getenv("CIVICCLERK_MAX_TILES", "160"))
+MAX_DISCOVERY_PAGES = int(os.getenv("CIVICCLERK_MAX_DISCOVERY", "25"))
+
+SALIDA_DEBUG = os.getenv("SALIDA_DEBUG", "0") == "1"
+AGENDA_KEYWORDS = ("agenda", "packet")
+
+# ---------- date helpers ----------
+
+_ORDINAL_RE = re.compile(r"(\d+)(st|nd|rd|th)\b", flags=re.I)
+_FALLBACK_DATE_GUESS = re.compile(
+    r"(?:(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\w*,?\s*)?"
+    r"([A-Za-z]{3,9}|\d{1,2})[\/\-\s.,]+(\d{1,2})[\/\-\s.,]+(\d{2,4})"
+    r"(?:\s*[,@]*\s*\d{1,2}:\d{2}\s*(AM|PM)?)?",
+    re.I,
 )
 
-STAGE = "[SALIDA]"
 
-# ---- Helpers ----
+def _clean(s: Optional[str]) -> str:
+    return " ".join((s or "").split())
 
-def _hash(s: str) -> str:
-    return hashlib.sha1(s.encode("utf-8", "ignore")).hexdigest()[:10]
 
-def _now_local_iso() -> str:
-    return dt.datetime.now().astimezone().isoformat()
-
-def _is_upcoming(meeting_dt: Optional[dt.datetime]) -> bool:
-    if not meeting_dt:
-        return True  # if unknown, let it pass
-    now = dt.datetime.now(tz=meeting_dt.tzinfo)
-    return meeting_dt >= now.replace(microsecond=0)
-
-def _req(session: Optional[requests.Session] = None) -> requests.Session:
-    return session or requests.Session()
-
-def _fetch(session: Optional[requests.Session], url: str, timeout: int = 30) -> requests.Response:
-    s = _req(session)
-    r = s.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r
-
-def _extract_pdf_text(pdf_bytes: bytes) -> str:
-    text = ""
-    # Try pdfminer
+def _parse_date(text: str) -> Optional[str]:
+    if not text:
+        return None
+    t = _ORDINAL_RE.sub(r"\1", _clean(text))
+    t = re.sub(r"\s+at\s+", " ", t, flags=re.I)
     try:
-        from pdfminer.high_level import extract_text
-        with io.BytesIO(pdf_bytes) as f:
-            text = extract_text(f) or ""
-    except Exception as e:
-        logging.warning(f"{STAGE} pdfminer failed: {e}")
-    # Fallback PyPDF2 if too short
-    if len(text.strip()) < 200:
-        try:
-            import PyPDF2
-            reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
-            text = "\n".join(page.extract_text() or "" for page in reader.pages)
-        except Exception as e:
-            logging.warning(f"{STAGE} PyPDF2 failed: {e}")
-    return text or ""
+        return _dtparser.parse(t, fuzzy=True, dayfirst=False).date().isoformat()
+    except Exception:
+        m = _FALLBACK_DATE_GUESS.search(t)
+        if m:
+            try:
+                return _dtparser.parse(m.group(0), fuzzy=True, dayfirst=False).date().isoformat()
+            except Exception:
+                return None
+        return None
 
-def _heuristic_bullets(text: str, max_bullets: int = 20) -> List[str]:
-    lines = [ln.strip() for ln in text.splitlines()]
-    cand = []
-    for ln in lines:
-        if not ln:
-            continue
-        if re.match(r"^(\d+[\).\s]|[-•–]\s)", ln):
-            cand.append(ln)
-        elif re.search(r"\b(Ordinance|Resolution|Public Hearing|Approval|Consent|Budget|Contract|Bid|Appointment|Report|Presentation|First Reading|Second Reading|Hearing)\b", ln, re.I):
-            cand.append(ln)
-    # de-dup & clean
-    seen = set()
-    cleaned = []
-    for ln in cand:
-        ln = re.sub(r"\s{2,}", " ", ln).strip()
-        key = ln.lower()
-        if key not in seen:
-            seen.add(key)
-            cleaned.append(ln)
-    # bulletify
-    bullets = []
-    for ln in cleaned[:max_bullets]:
-        ln = re.sub(r"^(\d+[\).\s]|[-•–]\s)", "", ln).strip()
-        if len(ln) > 280:
-            ln = ln[:277] + "…"
-        bullets.append(f"• {ln}")
-    return bullets
 
-def _summarize_primary(text: str, limit: Optional[int] = None) -> List[str]:
-    """
-    Bridge to project's summarize_agenda().
-    """
+# ---------- HTML helpers ----------
+
+LIKELY_TILE_SEL = "[role='link'], a.meeting, .meeting, .tile, .card, article, li, .Row, .ListItem"
+LIKELY_TIME_CHILDREN = "time[datetime], time, .meeting-date, .date, [data-date], [data-start]"
+PRI_WORDS = ("meeting", "agenda", "packet", "council", "board", "commission")
+
+_ONCLICK_URL_RE = re.compile(
+    r"""(?:location(?:\.href)?|window\.location(?:\.href)?)\s*=\s*(['"])(.+?)\1""",
+    re.I,
+)
+
+
+def _same_site(base: str, href: str) -> bool:
     try:
-        from utils import summarize_agenda  # project function
-        return summarize_agenda(text, max_bullets=limit)
-    except Exception as e:
-        logging.warning(f"{STAGE} primary summarizer unavailable/failed: {e}")
-        return []
+        bu = urlparse(base)
+        hu = urlparse(href)
+        return (hu.netloc == "" or hu.netloc == bu.netloc) and (hu.scheme in ("", bu.scheme))
+    except Exception:
+        return True
 
-def _parse_meeting_datetime_str(s: str) -> Optional[dt.datetime]:
-    """
-    Attempt to parse common CivicClerk datetime strings.
-    Examples: "Tuesday, October 22, 2025 6:00 PM"
-    """
-    s = re.sub(r"\s+", " ", s).strip()
-    patterns = [
-        "%A, %B %d, %Y %I:%M %p",
-        "%B %d, %Y %I:%M %p",
-        "%m/%d/%Y %I:%M %p",
-        "%Y-%m-%d %H:%M",
-    ]
-    for p in patterns:
-        try:
-            return dt.datetime.strptime(s, p).astimezone()
-        except Exception:
-            continue
+
+def _normalize(base: str, href: str) -> str:
+    if not href:
+        return base
+    return urljoin(base + "/", href)
+
+
+def _extract_text(tag) -> str:
+    try:
+        return _clean(tag.get_text(" ", strip=True))
+    except Exception:
+        return ""
+
+
+def _first_attr(tag, *names) -> Optional[str]:
+    for n in names:
+        v = tag.get(n)
+        if v and str(v).strip():
+            return _clean(str(v))
     return None
 
-def _origin(url: str) -> str:
-    u = urlparse.urlparse(url)
-    return f"{u.scheme}://{u.netloc}"
 
-def _resolve_url(base: str, href: str) -> str:
-    return urlparse.urljoin(base, href)
-
-# ---- CivicClerk specifics ----
-
-def _find_agenda_link_on_event(page) -> Optional[str]:
-    """
-    On the hydrated event detail view, try to locate an "Agenda" file link.
-    Strategy:
-      - Look for elements containing text "Files" or "Agenda" and anchor children.
-      - Otherwise, scrape all anchors; pick those with innerText containing "Agenda"
-        or href containing '/files/agenda/' or '/GetMeetingFileStream'.
-    Returns absolute URL or None.
-    """
-    # Try tabs/buttons that reveal files
-    try:
-        # Some portals use a "Files" tab/button
-        files_button = page.locator("text=Files").first
-        if files_button.count() > 0:
-            files_button.click(timeout=3000)
-            page.wait_for_timeout(200)  # brief settle
-    except Exception:
-        pass
-
-    anchors = page.locator("a").all()
-    candidates = []
-    base = page.url
-    for a in anchors:
+def _extract_date_text_from_bs4(tag) -> Optional[str]:
+    for sel in LIKELY_TIME_CHILDREN.split(","):
+        sel = sel.strip()
         try:
-            text = (a.inner_text() or "").strip()
-            href = (a.get_attribute("href") or "").strip()
+            found = tag.select_one(sel)
         except Exception:
-            continue
+            found = None
+        if found:
+            a = _first_attr(found, "datetime", "data-date", "data-start", "aria-label", "title")
+            if a:
+                return a
+            txt = _extract_text(found)
+            if txt:
+                return txt
+    a = _first_attr(tag, "aria-label", "title", "data-date", "data-start")
+    if a:
+        return a
+    return None
+
+
+def _extract_title_from_bs4(tag) -> Optional[str]:
+    for sel in ("h1", "h2", "h3", "h4", ".meeting-title", ".title", "a", "[role='link']"):
+        try:
+            node = tag.select_one(sel)
+        except Exception:
+            node = None
+        if node:
+            t = _extract_text(node)
+            if t:
+                return t
+    t = _extract_text(tag)
+    return t or None
+
+
+def _extract_meeting_href(tag) -> Optional[str]:
+    """
+    CivicClerk often renders:
+      - <a href="#"> with data-href/data-url/data-link
+      - <div onclick="location.href='/en/Meetings/Details/...'">
+    This extracts the *real* target when present.
+    """
+    # 1) direct anchor with a usable href
+    for a in tag.select("a[href]"):
+        href = (a.get("href") or "").strip()
         if not href:
             continue
-        href_abs = _resolve_url(base, href)
-        score = 0
-        if re.search(r"\bagenda\b", text, re.I):
-            score += 5
-        if re.search(r"/files/agenda/|GetMeetingFileStream", href_abs, re.I):
-            score += 5
-        if href_abs.lower().endswith(".pdf"):
-            score += 1
-        if score > 0:
-            candidates.append((score, href_abs, text))
+        bad = href == "#" or href.lower().startswith("javascript:")
+        if bad:
+            # try data-* on the anchor
+            via_data = a.get("data-href") or a.get("data-url") or a.get("data-link")
+            if via_data:
+                return via_data.strip()
+            # or onclick on the anchor
+            onclick = a.get("onclick") or ""
+            m = _ONCLICK_URL_RE.search(onclick)
+            if m:
+                return m.group(2).strip()
+            continue
+        return href
 
-    if not candidates:
-        return None
-    candidates.sort(key=lambda x: (-x[0], x[1]))
-    best = candidates[0][1]
-    return best
+    # 2) any element with data-* pointing to a url
+    data = _first_attr(tag, "data-href", "data-url", "data-link")
+    if data:
+        return data
 
-def _to_plaintext_endpoint(url: str) -> Optional[str]:
-    """
-    Given an Agenda URL, try to convert to the CivicClerk plaintext stream API.
-    Accepts either /files/agenda/<id> or ...GetMeetingFileStream?fileId=<id>.
-    """
-    # Case 1: /files/agenda/<id>
-    m = re.search(r"/files/agenda/(\d+)", url, re.I)
+    # 3) onclick='location.href="..."'
+    onclick = tag.get("onclick") or ""
+    m = _ONCLICK_URL_RE.search(onclick)
     if m:
-        file_id = m.group(1)
-        origin = _origin(url)
-        return f"{origin}/WebAPI/MeetingFile/GetMeetingFileStream?fileId={file_id}&plainText=true"
-    # Case 2: existing GetMeetingFileStream
-    if "GetMeetingFileStream" in url:
-        # ensure plainText=true
-        parsed = urlparse.urlparse(url)
-        qs = dict(urlparse.parse_qsl(parsed.query))
-        qs["plainText"] = "true"
-        new_q = urlparse.urlencode(qs)
-        return urlparse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, parsed.params, new_q, parsed.fragment))
+        return m.group(2).strip()
+
     return None
 
-def _fetch_agenda_text(session: Optional[requests.Session], agenda_url: str) -> tuple[str, Optional[str]]:
+
+# ---------- PDF finder helpers (robust for the new portal) ----------
+
+def _extract_pdf_from_viewer_like(soup: BeautifulSoup, base: str) -> Optional[str]:
     """
-    Fetch agenda as text, preferring plaintext endpoint.
-    Returns (agenda_text, agenda_pdf_url_if_any).
+    Handle pdf.js viewer and other embed patterns to recover the underlying PDF.
     """
-    # Try plaintext endpoint
-    pt = _to_plaintext_endpoint(agenda_url)
-    if pt:
+    # 1) pdf.js toolbar usually has: <a id="download" href="...pdf">
+    a = soup.select_one("a#download[href$='.pdf'], a#download[href*='.pdf']")
+    if a and a.get("href"):
+        return _normalize(base, a.get("href"))
+
+    # 2) <iframe src="/viewer.html?file=<pdf-url>"> or similar
+    for frame in soup.select("iframe[src], embed[src], object[data]"):
+        src = frame.get("src") or frame.get("data") or ""
+        if not src:
+            continue
+        abs_src = _normalize(base, src)
+        # direct .pdf?
+        if abs_src.lower().endswith(".pdf") or ".pdf" in abs_src.lower():
+            return abs_src
+        # extract ?file=
         try:
-            r = _fetch(session, pt, timeout=30)
-            # CivicClerk returns text/plain or application/json-text-likes
-            text = r.text or ""
-            if len(text.strip()) >= 100:
-                return text, None  # no pdf url when plaintext succeeded
-        except Exception as e:
-            logging.info(f"{STAGE} plaintext endpoint failed ({e}); falling back to PDF")
+            qs = parse_qs(urlsplit(abs_src).query)
+            file_param = qs.get("file") or qs.get("FILE")
+            if file_param:
+                candidate = unquote(file_param[0])
+                # file param can be html-encoded
+                candidate = html.unescape(candidate)
+                return _normalize(base, candidate)
+        except Exception:
+            pass
 
-    # Fall back to PDF
-    pdf_url = agenda_url
+    # 3) Look into <script> blobs for a ...file:"/path/to.pdf" or url:"...pdf"
+    script_pdf = re.compile(r"""(?:"|')(?:file|url)(?:"|')\s*:\s*(?P<q>['"])(?P<u>[^'"]+?\.pdf)(?P=q)""", re.I)
+    for sc in soup.find_all("script"):
+        try:
+            txt = sc.string or sc.get_text() or ""
+        except Exception:
+            txt = ""
+        m = script_pdf.search(txt)
+        if m:
+            return _normalize(base, m.group("u"))
+
+    return None
+
+
+def _get_soup(url: str) -> Optional[BeautifulSoup]:
     try:
-        r = _fetch(session, pdf_url, timeout=45)
-        text = _extract_pdf_text(r.content)
-        return text, pdf_url
+        r = requests.get(url, timeout=30, headers={"User-Agent": "MeetingWatch/1.0"})
+        if r.status_code >= 400:
+            print(f"[salida] HTTP {r.status_code} on {url}")
+            return None
+        return BeautifulSoup(r.text, "html.parser")
     except Exception as e:
-        logging.warning(f"{STAGE} agenda PDF fetch/extract failed: {e}")
-        return "", pdf_url
+        print(f"[salida] requests error {url}: {e}")
+        return None
 
-# ---- Data model ----
 
-@dataclass
-class SalidaItem:
-    title: str
-    meeting_datetime_iso: str
-    source_url: str
-    agenda_pdf_url: Optional[str]
-    agenda_text_len: int
-    bullets: List[str]
-    summary_error: Optional[str]
-    item_id: str
-
-# ---- Core pipeline ----
-
-def _summarize(text: str) -> List[str]:
-    if not text or len(text.strip()) < 40:
-        return []
-    # Project primary
-    bullets = _summarize_primary(text, limit=None) or []
-    if bullets:
-        return bullets
-    # Fallback heuristic
-    return _heuristic_bullets(text, max_bullets=20)
-
-def _extract_title_and_dt_from_event(page) -> tuple[str, Optional[dt.datetime]]:
-    """
-    Attempt to capture title and meeting datetime from the event page content.
-    """
-    content_txt = ""
+def _find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
+    """Try to find an agenda/packet PDF on a meeting page and return absolute URL or None."""
     try:
-        content_txt = page.locator("body").inner_text()
+        if soup is None:
+            soup = _get_soup(source_url)
+        if not soup:
+            return None
+
+        # Prefer links that look like agendas/packets and end with .pdf
+        for a in soup.select("a[href$='.pdf'], a[href*='Agenda' i][href], a[href*='Packet' i][href]"):
+            href = (a.get("href") or "").strip()
+            text = _extract_text(a).lower()
+            h = href.lower()
+            if ".pdf" in h and (any(k in h for k in AGENDA_KEYWORDS) or any(k in text for k in AGENDA_KEYWORDS)):
+                return _normalize(source_url, href)
+
+        # Fallback: any PDF on the page
+        a = soup.select_one("a[href$='.pdf']")
+        if a and a.get("href"):
+            return _normalize(source_url, a.get("href"))
+
+        # New portal: recover the PDF from the viewer iframe / toolbar / scripts
+        portal_pdf = _extract_pdf_from_viewer_like(soup, source_url)
+        if portal_pdf:
+            return portal_pdf
     except Exception:
         pass
+    return None
 
-    # Title: prefer a prominent heading
-    title = ""
-    try:
-        for sel in ["h1", "h2", "header h1", "header h2", "[data-testid='event-title']"]:
-            loc = page.locator(sel).first
-            if loc.count() > 0:
-                t = (loc.inner_text() or "").strip()
-                if t:
-                    title = t
+
+def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
+    out: List[Dict] = []
+    tiles = soup.select(LIKELY_TILE_SEL)
+    if not tiles:
+        tiles = soup.select("a, article, li, div")
+
+    for tag in tiles[:MAX_TILES]:
+        # find the real target url (handle data-* and onclick)
+        raw_target = _extract_meeting_href(tag)
+        if not raw_target:
+            continue
+
+        full = _normalize(source_url, raw_target)
+        # ignore if it resolves back to the same page root
+        if full.rstrip("/") in (source_url.rstrip("/"), urljoin(source_url + "/", "#").rstrip("/")):
+            continue
+
+        dt_text = _extract_date_text_from_bs4(tag) or _extract_text(tag)
+        iso = _parse_date(dt_text)
+        if not iso:
+            # fallback: scan <time> elsewhere
+            for tm in soup.select("time[datetime], time"):
+                iso = _parse_date(_first_attr(tm, "datetime") or _extract_text(tm) or "")
+                if iso:
                     break
-    except Exception:
-        pass
-    if not title:
-        # fallback: first line in body
-        title = (content_txt.splitlines() or [""])[0].strip()
+        if not iso:
+            if SALIDA_DEBUG:
+                print(f"[salida] Skip tile (no date): {full}")
+            continue
 
-    # Datetime: search for usual patterns in the page text
-    mt = None
-    for ln in content_txt.splitlines():
-        ln = ln.strip()
-        mt = _parse_meeting_datetime_str(ln)
-        if mt:
+        # Skip past dates (keep today and future)
+        try:
+            if iso < date.today().isoformat():
+                if SALIDA_DEBUG:
+                    print(f"[salida] Skip past date {iso} for {full}")
+                continue
+        except Exception:
+            pass
+
+        title = _extract_title_from_bs4(tag) or "Meeting"
+
+        # Prefer a direct agenda/packet PDF when possible
+        final_url = full
+        try:
+            if not final_url.lower().endswith(".pdf"):
+                pdf = _find_agenda_pdf(final_url)
+                if pdf:
+                    if SALIDA_DEBUG:
+                        print(f"[salida] Resolved agenda PDF: {final_url} -> {pdf}")
+                    final_url = pdf
+        except Exception:
+            pass
+
+        out.append(
+            {
+                "city": CITY_NAME,
+                "provider": PROVIDER,
+                "title": title,
+                "date": iso,
+                "url": final_url,
+                "source": source_url,
+            }
+        )
+
+    return out
+
+
+# ---------- requests path ----------
+
+def _requests_candidates(url: str) -> List[Dict]:
+    soup = _get_soup(url)
+    if not soup:
+        return []
+    out = _scan_tiles_bs4(soup, url)
+    if out:
+        return out
+
+    # Discovery: collect promising links, visit a few, scan again
+    links: List[str] = []
+    for a in soup.select("a[href], [onclick], [data-href], [data-url], [data-link]"):
+        href = (a.get("href") or "").strip()
+        text = _extract_text(a)
+        data = a.get("data-href") or a.get("data-url") or a.get("data-link")
+        onclick = a.get("onclick") or ""
+        target = None
+        if href and href != "#" and not href.lower().startswith("javascript:"):
+            target = href
+        elif data:
+            target = data
+        else:
+            m = _ONCLICK_URL_RE.search(onclick)
+            if m:
+                target = m.group(2)
+        if not target:
+            continue
+        h = (target or "").lower()
+        t = (text or "").lower()
+        if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
+            full = _normalize(url, target)
+            if _same_site(url, full):
+                links.append(full)
+
+    dedup: List[str] = []
+    seen: Set[str] = set()
+    for l in links:
+        if l not in seen:
+            seen.add(l)
+            dedup.append(l)
+
+    results: List[Dict] = []
+    for target in dedup[:MAX_DISCOVERY_PAGES]:
+        sub = _get_soup(target)
+        if not sub:
+            continue
+        results.extend(_scan_tiles_bs4(sub, target))
+        if results:
+            break  # first success is enough
+
+    return results
+
+
+# ---------- playwright path ----------
+
+def _playwright_candidates(entry_url: str) -> List[Dict]:
+    out: List[Dict] = []
+    if sync_playwright is None:
+        return out
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.set_default_timeout(25000)
+
+            print(f"[salida] Navigating to {entry_url}")
+            page.goto(entry_url, wait_until="networkidle")
+
+            # Try common SPA containers before scanning
+            for sel in ["main", "#root", "[role='main']", ".meetings", ".agenda", ".List"]:
+                try:
+                    page.locator(sel).first.wait_for(timeout=2000)
+                    break
+                except Exception:
+                    pass
+
+            # Collect promising links for discovery (including onclick/data-* cases)
+            candidates: List[str] = []
+            anchors = page.locator("a, [onclick], [data-href], [data-url], [data-link]").all()
+            for a in anchors:
+                try:
+                    href = (a.get_attribute("href") or "").strip()
+                    text = (a.text_content() or "").strip()
+                    data = a.get_attribute("data-href") or a.get_attribute("data-url") or a.get_attribute("data-link")
+                    onclick = a.get_attribute("onclick") or ""
+                    target = None
+                    if href and href != "#" and not href.lower().startswith("javascript:"):
+                        target = href
+                    elif data:
+                        target = data
+                    else:
+                        m = _ONCLICK_URL_RE.search(onclick or "")
+                        if m:
+                            target = m.group(2)
+                    if not target:
+                        continue
+                    h = (target or "").lower()
+                    t = (text or "").lower()
+                    if any(w in h for w in PRI_WORDS) or any(w in t for w in PRI_WORDS):
+                        full = _normalize(entry_url, target)
+                        if _same_site(entry_url, full):
+                            candidates.append(full)
+                except Exception:
+                    pass
+
+            # Scan current page
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            out.extend(_scan_tiles_bs4(soup, entry_url))
+
+            # If none, walk a few candidate links and repeat
+            seen: Set[str] = set()
+            for target in candidates[:MAX_DISCOVERY_PAGES]:
+                if target in seen:
+                    continue
+                seen.add(target)
+                try:
+                    page.goto(target, wait_until="networkidle")
+                    html = page.content()
+                    soup = BeautifulSoup(html, "html.parser")
+                    sub = _scan_tiles_bs4(soup, target)
+                    if sub:
+                        out.extend(sub)
+                        break
+                except Exception:
+                    pass
+        finally:
+            browser.close()
+    return out
+
+
+# ---------- public API ----------
+
+def _hosts_to_try() -> Iterable[str]:
+    tried = [SALIDA_BASE_URL] + ALT_HOSTS
+    seen: Set[str] = set()
+    for h in tried:
+        if h and h not in seen:
+            seen.add(h)
+            yield h
+
+
+def parse_salida() -> List[Dict]:
+    tried_urls: List[str] = []
+    results: List[Dict] = []
+
+    # Crawl a few likely entry points on a couple of hostnames
+    for host in _hosts_to_try():
+        for path in ENTRY_PATHS:
+            entry = (host + path).rstrip("/")
+            tried_urls.append(entry)
+
+            # Prefer your Playwright path if it returns anything
+            items = _playwright_candidates(entry)
+            if not items:
+                items = _requests_candidates(entry)
+
+            if items:
+                results.extend(items)
+            if results:
+                break
+        if results:
             break
 
-    return title, mt
+    # de-dup based on (date, title, url)
+    seen: Set[Tuple[str, str, str]] = set()
+    unique: List[Dict] = []
+    for m in results:
+        key = (m.get("date", ""), m.get("title", ""), m.get("url", ""))
+        if key not in seen:
+            seen.add(key)
+            unique.append(m)
 
-def _gather_event_links(playwright, entry_urls: List[str], max_pages: int = 3) -> List[str]:
+    # Enrich each meeting with a direct agenda/packet PDF when possible
+    for m in unique:
+        u = (m.get("url") or "").strip()
+
+        # If we already have a direct PDF URL as "url", mirror it to agenda_url
+        if u.lower().endswith(".pdf"):
+            m["agenda_url"] = u
+            continue
+
+        # Otherwise try to find the agenda/packet PDF on the event's files page.
+        # Use "url" first, else fall back to source.
+        source_for_files = u or (m.get("source") or "").strip()
+        agenda = find_agenda_pdf(source_for_files)
+        if agenda:
+            m["agenda_url"] = agenda
+
+    print(f"[salida] Visited {len(tried_urls)} entry url(s); accepted {len(unique)} items")
+    return unique
+
+
+def find_agenda_pdf(source_url: str, soup: Optional[BeautifulSoup] = None) -> Optional[str]:
     """
-    Uses Playwright to open each entry URL (calendar/meetings landing) and collect event links.
+    Try to find an agenda/packet PDF on a CivicClerk *event files* page and
+    return an absolute URL or None.
+
+    Heuristics:
+      - Prefer links with text/aria-label/title containing 'Agenda' or 'Packet'.
+      - Exclude obvious 'Minutes' links.
+      - Prefer URLs that end in .pdf.
+      - Also handle viewer pages like /event/<id>/files/agenda/<fileId>
+        by extracting the underlying PDF from the embedded pdf.js viewer.
     """
-    browser = playwright.chromium.launch(headless=True)
-    ctx = browser.new_context()
-    page = ctx.new_page()
-    links = set()
+    # If caller passed event root, hop to /files
+    m = re.search(r"(/event/\d+)(/files)?/?$", source_url)
+    if m and not m.group(2):
+        source_url = urljoin(source_url, m.group(1) + "/files")
 
-    for u in entry_urls:
-        try:
-            logging.info(f"{STAGE} open list {u}")
-            page.goto(u, wait_until="domcontentloaded", timeout=30000)
-            # try to trigger lazy load/scroll
-            for _ in range(3):
-                page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(200)
-
-            # Collect anchors likely to be events
-            for a in page.locator("a").all():
-                try:
-                    href = a.get_attribute("href") or ""
-                except Exception:
-                    continue
-                if not href:
-                    continue
-                href_abs = _resolve_url(page.url, href)
-                if re.search(r"/event/|/meeting/", href_abs, re.I):
-                    links.add(href_abs)
-        except PWTimeout:
-            logging.warning(f"{STAGE} timeout listing {u}")
-        except Exception as e:
-            logging.warning(f"{STAGE} error listing {u}: {e}")
-
-    ctx.close()
-    browser.close()
-    return sorted(links)
-
-def parse_salida(entry_urls: list[str] | None = None, upcoming_only: bool = True, limit: int | None = None) -> list[dict]:
-    if entry_urls is None:
-        entry_urls = [
-            "https://salida.civicclerk.com/",
-            "https://salidaco.portal.civicclerk.com/",
-        ]
-    """
-    Main entry. Given one or more Salida CivicClerk listing URLs, return enriched items with bullets.
-    """
-    if sync_playwright is None:
-        raise RuntimeError("Playwright not available. Please install and run `playwright install`.")
-
-    items: List[SalidaItem] = []
-    with sync_playwright() as p:
-        event_links = _gather_event_links(p, entry_urls)
-        if limit:
-            event_links = event_links[:limit]
-
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context()
-        page = ctx.new_page()
-        session = requests.Session()
-
-        for ev_url in event_links:
-            try:
-                logging.info(f"{STAGE} stage=event_open url={ev_url}")
-                page.goto(ev_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(300)  # small hydrate window
-
-                title, meeting_dt = _extract_title_and_dt_from_event(page)
-                if upcoming_only and not _is_upcoming(meeting_dt):
-                    logging.info(f"{STAGE} skip past event title={title!r} url={ev_url}")
-                    continue
-
-                agenda_link = _find_agenda_link_on_event(page)
-                summary_error = None
-                agenda_text = ""
-                agenda_pdf_url = None
-
-                if agenda_link:
-                    logging.info(f"{STAGE} stage=agenda_link url={agenda_link}")
-                    agenda_text, agenda_pdf_url = _fetch_agenda_text(session, agenda_link)
-                    logging.info(f"{STAGE} stage=agenda_text len={len(agenda_text)}")
-                else:
-                    summary_error = "no_agenda_link"
-
-                bullets = []
-                if agenda_text and not summary_error:
-                    bullets = _summarize(agenda_text)
-                    logging.info(f"{STAGE} stage=summary bullets={len(bullets)}")
-                    if not bullets:
-                        summary_error = "empty_summary_after_fallback"
-
-                meeting_iso = (meeting_dt or dt.datetime.now().astimezone()).isoformat()
-                it = SalidaItem(
-                    title=title.strip(),
-                    meeting_datetime_iso=meeting_iso,
-                    source_url=ev_url,
-                    agenda_pdf_url=agenda_pdf_url,
-                    agenda_text_len=len(agenda_text or ""),
-                    bullets=bullets,
-                    summary_error=summary_error,
-                    item_id=_hash(f"{title}|{meeting_iso}|{agenda_link or ev_url}")
-                )
-                items.append(it)
-                logging.info(f"{STAGE} stage=done bullets={len(it.bullets)} err={it.summary_error} id={it.item_id}")
-            except PWTimeout:
-                logging.warning(f"{STAGE} timeout opening event {ev_url}")
-            except Exception as e:
-                logging.warning(f"{STAGE} error processing event {ev_url}: {e}")
-
-        ctx.close()
-        browser.close()
-
-    # De-dupe by item_id
-    dedup: Dict[str, SalidaItem] = {}
-    for it in items:
-        dedup[it.item_id] = it
-    final = [asdict(it) for it in dedup.values()]
-    # Sort by meeting_datetime_iso
-    final.sort(key=lambda d: d["meeting_datetime_iso"])
-    return final
-
-# ---- CLI entrypoint for quick local testing ----
-
-def _default_entry_urls() -> List[str]:
-    # These are examples; replace with your actual Salida CivicClerk URLs.
-    # Often index pages are like:
-    #   https://salida.civicclerk.com/ or https://salidaco.portal.civicclerk.com/
-    # And/or specific meeting listing pages.
-    return [
-        "https://salida.civicclerk.com/",
-        "https://salidaco.portal.civicclerk.com/",
-    ]
-
-if __name__ == "__main__":
-    urls = sys.argv[1:] or _default_entry_urls()
-    logging.info(f"{STAGE} run started at { _now_local_iso() }")
     try:
-        items = parse_salida(["https://salida.civicclerk.com/", "https://salidaco.portal.civicclerk.com/",])
-        print(json.dumps(items, indent=2, ensure_ascii=False))
-    except Exception as e:
-        logging.error(f"{STAGE} fatal error: {e}")
-        sys.exit(1)
+        if soup is None:
+            r = requests.get(source_url, timeout=30, headers={"User-Agent": "MeetingWatch/1.0"})
+            r.raise_for_status()
+            soup = BeautifulSoup(r.text, "html.parser")
+    except Exception:
+        return None
+
+    base = source_url
+
+    # Collect raw links
+    links: List[Tuple[str, str]] = []
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if not href:
+            continue
+        text = " ".join([
+            a.get_text(" ", strip=True) or "",
+            a.get("aria-label", "") or "",
+            a.get("title", "") or "",
+            a.get("data-file-name", "") or "",
+        ]).strip()
+        links.append((href, text))
+
+    # Special handling: If current page is a "viewer" subpage, dive deeper first.
+    # e.g., /event/519/files/agenda/1101
+    if re.search(r"/event/\d+/files/.+/\d+/?$", urlparse(base).path):
+        pdf_from_viewer = _extract_pdf_from_viewer_like(soup, base)
+        if pdf_from_viewer:
+            return pdf_from_viewer
+
+    # Score links by how much they look like agendas/packets
+    def score(href: str, text: str) -> int:
+        t = f"{href} {text}".lower()
+
+        # Base score if it's a PDF
+        s = 10 if ".pdf" in href.lower() or href.lower().endswith(".pdf") else 0
+
+        # Strong positive signals
+        if "agenda" in t: s += 25
+        if "packet" in t: s += 20
+        if "board packet" in t or "meeting packet" in t or "council packet" in t: s += 5
+        if "regular meeting" in t or "work session" in t: s += 3
+
+        # Negative signals
+        if "minutes" in t: s -= 30
+        if "video" in t or "livestream" in t: s -= 15
+
+        # Prefer shorter query/link clutter a bit less
+        if "?" not in href: s += 2
+
+        return s
+
+    if links:
+        scored: List[Tuple[int, str]] = []
+        for href, text in links:
+            absu = urljoin(base, href)
+            scored.append((score(href, text), absu))
+
+        scored.sort(reverse=True, key=lambda x: x[0])
+
+        # Top candidate must be a positive score and should end with .pdf ideally
+        for s, u in scored:
+            if s <= 0:
+                break
+            if u.lower().endswith(".pdf"):
+                return u
+
+        # If nothing ended in .pdf but we have a positive candidate, return the best one
+        if scored and scored[0][0] > 0:
+            # If best is a viewer subpage, open it and try to pull the PDF
+            best = scored[0][1]
+            if re.search(r"/event/\d+/files/.+/\d+/?$", urlparse(best).path):
+                sub = _get_soup(best)
+                if sub:
+                    viewer_pdf = _extract_pdf_from_viewer_like(sub, best)
+                    if viewer_pdf:
+                        return viewer_pdf
+            return best
+
+    # Last-ditch: try to recover from embedded viewer on the current page
+    return _extract_pdf_from_viewer_like(soup, base)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    print(json.dumps(parse_salida(), indent=2))

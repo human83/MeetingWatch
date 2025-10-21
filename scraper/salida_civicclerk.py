@@ -1,5 +1,4 @@
 
-# scraper/salida_civicclerk.py
 from __future__ import annotations
 
 import os
@@ -11,7 +10,6 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as _dtparser
 
-# Playwright is preferred for JS-rendered CivicClerk pages
 try:
     from playwright.sync_api import sync_playwright
 except Exception:  # pragma: no cover
@@ -167,8 +165,13 @@ def _requests_candidates(url: str) -> List[Dict]:
             break
     return results
 
-# ---------------- Discovery (Playwright preferred) ----------------
+# ---------------- Discovery (Playwright preferred, DOM-driven) ----------------
 def _playwright_candidates(entry_url: str) -> List[Dict]:
+    """
+    Build items directly from the live DOM, scanning for links that route
+    to /event/<id>. This avoids relying on page.content()/soup for portals
+    that render inside Shadow DOM.
+    """
     out: List[Dict] = []
     if sync_playwright is None:
         return out
@@ -182,17 +185,17 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
                 print(f"[salida] Navigating to {entry_url}")
             page.goto(entry_url, wait_until="networkidle")
 
-            # First pass: query clickable cards/links directly from the live DOM
             locator = page.locator("a, [onclick], [data-href], [data-url], [data-link], [role='link']")
             els = locator.all()
 
-            candidates: List[str] = []
+            meta: List[Tuple[str, str]] = []
             for el in els:
                 try:
                     href = (el.get_attribute("href") or "").strip()
                     data = (el.get_attribute("data-href") or "") or (el.get_attribute("data-url") or "") or (el.get_attribute("data-link") or "")
                     onclick = el.get_attribute("onclick") or ""
-                    text = (el.text_content() or "").strip().lower()
+                    text = (el.text_content() or "").strip()
+
                     target = None
                     if href and href != "#" and not href.lower().startswith("javascript:"):
                         target = href
@@ -202,36 +205,62 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
                         m = re.search(r"(?:location\.href\s*=\s*|window\.open\()\s*['\"]([^'\"]+)['\"]", onclick, re.I)
                         if m:
                             target = m.group(1)
+
                     if not target:
                         continue
-                    if any(w in target.lower() for w in PRI_WORDS) or any(w in text for w in PRI_WORDS):
-                        full = _normalize(entry_url, target)
-                        if _same_site(entry_url, full):
-                            candidates.append(full)
+                    full = _normalize(entry_url, target)
+                    if not _same_site(entry_url, full):
+                        continue
+                    if "/event/" in full:
+                        meta.append((full, text))
                 except Exception:
                     pass
 
-            # Visit a handful of promising subpages, scan again using BeautifulSoup on rendered HTML
-            seen: Set[str] = set()
-            for target in candidates[:MAX_DISCOVERY_PAGES]:
-                if target in seen:
+            # Dedup and synthesize
+            seen=set()
+            items: List[Dict]=[]
+            for url, txt in meta:
+                if url in seen:
                     continue
-                seen.add(target)
-                try:
-                    page.goto(target, wait_until="networkidle")
-                    html_doc = page.content()
-                    soup = BeautifulSoup(html_doc, "html.parser")
-                    sub = _scan_tiles_bs4(soup, target)
-                    if sub:
-                        out.extend(sub)
-                        break
-                except Exception:
-                    pass
+                seen.add(url)
+                items.append({
+                    "city": CITY_NAME,
+                    "provider": PROVIDER,
+                    "title": (txt or "Meeting")[:150] or "Meeting",
+                    "date": _parse_date(txt) or "",
+                    "url": url,
+                    "source": entry_url,
+                })
 
-            # If no subpages produced tiles, try scanning the entry page itself
+            out.extend(items[:MAX_TILES])
+
+            # If still empty, try a few canonical subpaths
             if not out:
-                soup0 = BeautifulSoup(page.content(), "html.parser")
-                out.extend(_scan_tiles_bs4(soup0, entry_url))
+                for path in ["/Meetings", "/en/Meetings", "/en-US/Meetings", "/Agendas-Minutes", "/en/Agendas-Minutes"]:
+                    try:
+                        page.goto(_normalize(entry_url, path), wait_until="networkidle")
+                        els = page.locator("a, [role='link']").all()
+                        for el in els:
+                            href = (el.get_attribute("href") or "").strip()
+                            text = (el.text_content() or "").strip()
+                            if not href:
+                                continue
+                            full = _normalize(entry_url, href)
+                            if not _same_site(entry_url, full):
+                                continue
+                            if "/event/" in full:
+                                out.append({
+                                    "city": CITY_NAME,
+                                    "provider": PROVIDER,
+                                    "title": (text or "Meeting")[:150],
+                                    "date": _parse_date(text) or "",
+                                    "url": full,
+                                    "source": _normalize(entry_url, path),
+                                })
+                        if out:
+                            break
+                    except Exception:
+                        pass
         finally:
             browser.close()
     return out
@@ -240,7 +269,7 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
 FILE_HREF_RE = re.compile(r"/files/(?:agenda|packet)/(\d+)", re.I)
 
 def _extract_fileids_from_html(html_text: str) -> List[str]:
-    return list(dict.fromkeys(FILE_HREF_RE.findall(html_text or "")))  # de-dupe while preserving order
+    return list(dict.fromkeys(FILE_HREF_RE.findall(html_text or "")))
 
 def _file_weight(label: str) -> int:
     t = (label or "").lower()
@@ -266,7 +295,6 @@ def _collect_file_candidates_with_playwright(files_url: str) -> List[Tuple[int, 
             page.set_default_timeout(30000)
             page.goto(files_url, wait_until="networkidle")
 
-            # 1) direct anchors
             anchors = page.locator("a[href*='/files/agenda/'], a[href*='/files/packet/']").all()
             for a in anchors:
                 try:
@@ -278,7 +306,6 @@ def _collect_file_candidates_with_playwright(files_url: str) -> List[Tuple[int, 
                 except Exception:
                     pass
 
-            # 2) html regex sweep (catches some shadow/light content rendered)
             ids = _extract_fileids_from_html(page.content())
             for fid in ids:
                 cands.append((_file_weight("Agenda Packet"), fid))
@@ -286,7 +313,6 @@ def _collect_file_candidates_with_playwright(files_url: str) -> List[Tuple[int, 
         finally:
             browser.close()
 
-    # Sort best-first
     cands.sort(key=lambda t: t[0], reverse=True)
     return cands
 
@@ -308,7 +334,6 @@ def _collect_file_candidates_requests(files_url: str) -> List[Tuple[int, str]]:
     return cands
 
 def _ensure_files_url(u: str) -> str:
-    # normalize /event/<id> to /event/<id>/files
     parsed = urlparse(u)
     m = re.search(r"^(/event/\d+)(?:/|$)", parsed.path or "", re.I)
     if m and not m.group(0).endswith("/files") and "/files/" not in parsed.path:
@@ -316,10 +341,6 @@ def _ensure_files_url(u: str) -> str:
     return u
 
 def find_agenda_pdf(source_url: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Returns (pdf_url, plain_text_url) for the best agenda/packet.
-    Prefers Playwright to extract fileId from the Meeting Files page.
-    """
     files_url = _ensure_files_url(source_url)
 
     cands: List[Tuple[int, str]] = []
@@ -336,7 +357,6 @@ def find_agenda_pdf(source_url: str) -> Tuple[Optional[str], Optional[str]]:
             print(f"[salida] No agenda fileIds on {files_url}")
         return None, None
 
-    # pick best
     _, file_id = cands[0]
     api_base = _api_base_from_portal(files_url)
     pdf = f"{api_base}/v1/Meetings/GetMeetingFileStream(fileId={file_id},plainText=false)"
@@ -360,7 +380,6 @@ def parse_salida() -> List[Dict]:
 
     print('[salida] parse_salida starting; hosts:', ', '.join(list(_hosts_to_try())))
 
-    # Crawl likely entry points; prefer Playwright
     for host in _hosts_to_try():
         for path in ENTRY_PATHS:
             entry = (host + path).rstrip("/")
@@ -377,7 +396,7 @@ def parse_salida() -> List[Dict]:
 
             if items:
                 discovered.extend(items)
-                break  # good enough for this host
+                break
         if discovered:
             break
 
@@ -408,14 +427,9 @@ def parse_salida() -> List[Dict]:
 
     return unique
 
-
-# --- thin wrapper so generic runners can call this module ---
-# Many of our city scrapers expose a `parse()` entrypoint. Add it here
-# to keep the interface consistent with the rest of the pipeline.
 def parse():
     return parse_salida()
 
-# Allow quick manual testing: `python salida_civicclerk.py`
 if __name__ == "__main__":
     items = parse_salida()
     print(f"[salida] parse() produced {len(items)} items")

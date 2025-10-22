@@ -134,8 +134,9 @@ def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = M
         raw = [ln.strip() for ln in content.splitlines() if ln.strip()]
         bullets: List[str] = []
         for ln in raw:
-            ln = re.sub(r"^\s*[-•*]\s*", "• ", ln)
-            if not ln.startswith("• "):
+            ln = ln.replace("\u00A0", " ").strip()
+            ln = re.sub(r"^\s*[•\-\*\u2013\u2014\u00B7\u2219]\s+", "• ", ln)
+            if not re.match(r"^\s*•\s+", ln):
                 ln = "• " + ln
             bullets.append(ln)
         if not bullets:

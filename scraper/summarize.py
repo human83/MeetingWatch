@@ -1,35 +1,295 @@
-import os, re
-from typing import List
+# scraper/summarize.py
+from __future__ import annotations
 
-def bulletify(text: str, n:int=8) -> List[str]:
-    # fallback extractive "summary" if no LLM key is present
-    lines = [re.sub(r"\s+", " ", ln).strip() for ln in text.splitlines()]
-    lines = [ln for ln in lines if ln]
-    return lines[:n]
+import argparse
+import json
+import os
+import re
+import sys
+import textwrap
+from dataclasses import dataclass
+from io import BytesIO
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-def llm_summarize(text: str, max_bullets:int=8) -> List[str]:
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    provider = os.getenv("LLM_PROVIDER", "openai")
-    if not api_key or provider == "none":
-        return bulletify(text, n=max_bullets)
+import requests
+
+# ---------------------------
+# Config via environment
+# ---------------------------
+MAX_BULLETS = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "12"))
+DEFAULT_MAX_PAGES = int(os.getenv("PDF_SUMMARY_MAX_PAGES", "20"))  # used only if fallback extractor supports it
+DEFAULT_MAX_CHARS = int(os.getenv("PDF_SUMMARY_MAX_CHARS", "50000"))
+SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini")
+DEBUG = os.getenv("PDF_SUMMARY_DEBUG", "0") == "1"
+
+UA = {"User-Agent": "MeetingWatch/1.0 (+https://github.com/human83/MeetingWatch)"}
+
+# ---------------------------
+# Utilities
+# ---------------------------
+
+def _log(msg: str) -> None:
+    print(f"[summarize] {msg}", flush=True)
+
+def _slugify(s: str, length: int = 80) -> str:
+    s = re.sub(r"\s+", "-", (s or "").strip().lower())
+    s = re.sub(r"[^a-z0-9\-_.]+", "", s)
+    return s[:length] or "meeting"
+
+def _looks_like_pdf(resp: requests.Response) -> bool:
+    ct = (resp.headers.get("Content-Type") or "").lower()
+    if "application/pdf" in ct:
+        return True
     try:
-        # Minimal OpenAI client usage (works with openai>=1.0)
-        from openai import OpenAI
-        client = OpenAI(api_key=api_key)
-        prompt = f"Summarize the following council/commission agenda into {max_bullets} plain-English bullets, focusing on budget, ordinances/resolutions, land use, fees, contracts, executive sessions, appointments. Keep each bullet short.\n\n---\n{text}\n---"
-        chat = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.2,
-            max_tokens=500
-        )
-        content = chat.choices[0].message.content
-        # Simple split into bullets
-        out = []
-        for ln in content.splitlines():
-            ln = ln.strip("-•* ").strip()
-            if ln:
-                out.append(ln)
-        return out[:max_bullets] or bulletify(text, n=max_bullets)
+        # small peek
+        head = resp.content[:5]
+        return head.startswith(b"%PDF-")
     except Exception:
-        return bulletify(text, n=max_bullets)
+        return False
+
+def _normalize_ws(text: str) -> str:
+    return re.sub(r"[ \t]+\n", "\n", re.sub(r"\r\n?", "\n", text))
+
+# ---------------------------
+# PDF text extraction (prefer project helper if present)
+# ---------------------------
+
+def _extract_text_from_pdf_bytes(data: bytes) -> str:
+    """
+    Try project-local pdf_utils first; else fallback to pdfminer.six.
+    """
+    # 1) Try local helper
+    try:
+        # these names are guesses; we try several common variants
+        from scraper import pdf_utils as pu  # type: ignore
+        for name in ("extract_text_from_bytes", "extract_text_from_pdf_bytes", "extract_text_from_pdf"):
+            fn = getattr(pu, name, None)
+            if callable(fn):
+                return fn(data) or ""
+    except Exception:
+        pass
+
+    # 2) Fallback: pdfminer.six
+    try:
+        from pdfminer.high_level import extract_text
+        return extract_text(BytesIO(data)) or ""
+    except Exception as e:
+        if DEBUG:
+            _log(f"pdfminer failed: {e!r}")
+        return ""
+
+# ---------------------------
+# LLM summarization
+# ---------------------------
+
+def bulletify(text: str, max_bullets: int = 10) -> List[str]:
+    """
+    Very simple fallback bullet generator for when LLM isn't available.
+    """
+    lines = [ln.strip(" •-*–\t") for ln in _normalize_ws(text).splitlines() if ln.strip()]
+    # pick lines that look like agenda items
+    items = []
+    for ln in lines:
+        if re.search(r"(^|\s)(item|resolution|ordinance|motion|approve|report|agenda)\b", ln, re.I):
+            items.append(ln)
+    if not items:
+        items = lines
+    bullets = []
+    for ln in items[: max_bullets * 2]:
+        # trim long lines
+        if len(ln) > 240:
+            ln = ln[:237] + "..."
+        bullets.append("• " + ln)
+        if len(bullets) >= max_bullets:
+            break
+    return bullets
+
+def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = MAX_BULLETS) -> List[str]:
+    """
+    Use OpenAI if keys/model present; fallback to bulletify otherwise.
+    """
+    api_key = os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        if DEBUG:
+            _log("OPENAI_API_KEY not set; using simple bulletify fallback")
+        return bulletify(text, max_bullets=max_bullets)
+
+    try:
+        # Use the lightweight responses client if available; otherwise basic requests to Chat Completions.
+        from openai import OpenAI  # type: ignore
+        client = OpenAI(api_key=api_key)
+        prompt = textwrap.dedent(f"""
+        You are a city agenda summarizer. Read the following agenda text and extract the most notable items.
+        Return up to {max_bullets} concise bullet points, each a single sentence.
+
+        Agenda:
+        ---
+        {text[:DEFAULT_MAX_CHARS]}
+        ---
+        """).strip()
+
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You create concise bullet points summarizing municipal meeting agendas."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+        )
+        content = (resp.choices[0].message.content or "").strip()
+        # split into bullets
+        raw = [ln.strip() for ln in content.splitlines() if ln.strip()]
+        bullets: List[str] = []
+        for ln in raw:
+            ln = re.sub(r"^\s*[-•*]\s*", "• ", ln)
+            if not ln.startswith("• "):
+                ln = "• " + ln
+            bullets.append(ln)
+        if not bullets:
+            bullets = bulletify(text, max_bullets=max_bullets)
+        return bullets[:max_bullets]
+    except Exception as e:
+        if DEBUG:
+            _log(f"LLM summarize failed: {e!r}; using fallback")
+        return bulletify(text, max_bullets=max_bullets)
+
+# ---------------------------
+# Fetch + summarize pipeline
+# ---------------------------
+
+@dataclass
+class SummaryResult:
+    ok: bool
+    reason: str
+    bullets: List[str]
+    used_url: Optional[str]
+    used_kind: Optional[str]  # "text" or "pdf"
+    chars: int
+
+def _fetch_text_url(url: str) -> Tuple[Optional[str], str]:
+    try:
+        r = requests.get(url, timeout=60, headers=UA)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        # try to decode as text; fall back to bytes->utf8
+        ct = (r.headers.get("Content-Type") or "").lower()
+        if "text/plain" in ct or "json" in ct or "text" in ct:
+            txt = r.text
+        else:
+            try:
+                txt = r.content.decode("utf-8", errors="replace")
+            except Exception:
+                txt = r.text  # requests will try decoding
+        return _normalize_ws(txt), ""
+    except Exception as e:
+        return None, f"fetch error: {e!r}"
+
+def _fetch_pdf_url(url: str) -> Tuple[Optional[str], str]:
+    try:
+        r = requests.get(url, timeout=90, headers=UA)
+        if r.status_code != 200:
+            return None, f"HTTP {r.status_code}"
+        if not _looks_like_pdf(r):
+            return None, f"not a PDF (Content-Type={r.headers.get('Content-Type')})"
+        text = _extract_text_from_pdf_bytes(r.content)
+        if not text:
+            return None, "no extractable text"
+        return _normalize_ws(text), ""
+    except Exception as e:
+        return None, f"fetch error: {e!r}"
+
+def summarize_meeting(meeting: Dict[str, Any]) -> SummaryResult:
+    """
+    Prefer agenda_text_url; else agenda_url (PDF). Return bullets or reason.
+    """
+    text_url = (meeting.get("agenda_text_url") or "").strip() or None
+    pdf_url = (meeting.get("agenda_url") or "").strip() or None
+
+    # 1) Text stream (best for CivicClerk plainText=true)
+    if text_url:
+        txt, err = _fetch_text_url(text_url)
+        if txt:
+            if len(txt) > DEFAULT_MAX_CHARS:
+                txt = txt[:DEFAULT_MAX_CHARS]
+            bullets = llm_summarize(txt)
+            return SummaryResult(True, "", bullets, text_url, "text", len(txt))
+        if DEBUG:
+            _log(f"Text fetch failed for {text_url}: {err}")
+
+    # 2) PDF stream (accept even without .pdf extension)
+    if pdf_url:
+        txt, err = _fetch_pdf_url(pdf_url)
+        if txt:
+            if len(txt) > DEFAULT_MAX_CHARS:
+                txt = txt[:DEFAULT_MAX_CHARS]
+            bullets = llm_summarize(txt)
+            return SummaryResult(True, "", bullets, pdf_url, "pdf", len(txt))
+        if DEBUG:
+            _log(f"PDF fetch failed for {pdf_url}: {err}")
+
+    return SummaryResult(False, "no agenda_text_url or usable agenda_url", [], text_url or pdf_url, None, 0)
+
+# ---------------------------
+# CLI
+# ---------------------------
+
+def _load_meetings(path: Path) -> List[Dict[str, Any]]:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    meetings = data.get("meetings") or []
+    return meetings
+
+def _write_meta(out_dir: Path, name: str, payload: Dict[str, Any]) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / f"{name}.meta.json").write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+def main(argv: Optional[List[str]] = None) -> int:
+    ap = argparse.ArgumentParser(description="Summarize meeting agendas into bullet points.")
+    ap.add_argument("--input", required=True, help="Path to meetings.json")
+    ap.add_argument("--out", required=True, help="Directory to write *.meta.json summaries")
+    args = ap.parse_args(argv)
+
+    in_path = Path(args.input)
+    out_dir = Path(args.out)
+
+    meetings = _load_meetings(in_path)
+    _log(f"Loaded {len(meetings)} meetings from {in_path}")
+
+    produced = 0
+    for idx, m in enumerate(meetings):
+        title = (m.get("title") or m.get("meeting") or "Meeting").strip()
+        date = (m.get("date") or m.get("meeting_date") or "").strip()
+        city = (m.get("city") or m.get("city_or_body") or "").strip()
+        slug = _slugify(f"{date}-{city}-{title}") or f"m{idx:03d}"
+
+        res = summarize_meeting(m)
+
+        meta = {
+            "title": title,
+            "city": city,
+            "date": date,
+            "source": m.get("source") or m.get("url"),
+            "agenda_url": m.get("agenda_url"),
+            "agenda_text_url": m.get("agenda_text_url"),
+            "used_url": res.used_url,
+            "used_kind": res.used_kind,
+            "chars_summarized": res.chars,
+            "bullets": res.bullets,
+            "ok": res.ok,
+            "reason": res.reason,
+        }
+        _write_meta(out_dir, slug, meta)
+
+        if res.ok and res.bullets:
+            produced += 1
+            if DEBUG:
+                _log(f"✓ {slug}: {len(res.bullets)} bullets ({res.used_kind})")
+        else:
+            if DEBUG:
+                _log(f"✗ {slug}: {res.reason}")
+
+    _log(f"Completed summaries: {produced}/{len(meetings)}")
+    return 0
+
+if __name__ == "__main__":
+    raise SystemExit(main())

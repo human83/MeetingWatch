@@ -5,12 +5,11 @@ import argparse
 import json
 import os
 import re
-import sys
 import textwrap
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -18,7 +17,7 @@ import requests
 # Config via environment
 # ---------------------------
 MAX_BULLETS = int(os.getenv("PDF_SUMMARY_MAX_BULLETS", "12"))
-DEFAULT_MAX_PAGES = int(os.getenv("PDF_SUMMARY_MAX_PAGES", "20"))  # used only if fallback extractor supports it
+DEFAULT_MAX_PAGES = int(os.getenv("PDF_SUMMARY_MAX_PAGES", "20"))  # kept for compatibility
 DEFAULT_MAX_CHARS = int(os.getenv("PDF_SUMMARY_MAX_CHARS", "50000"))
 SUMMARIZER_MODEL = os.getenv("SUMMARIZER_MODEL", "gpt-4o-mini")
 DEBUG = os.getenv("PDF_SUMMARY_DEBUG", "0") == "1"
@@ -42,9 +41,7 @@ def _looks_like_pdf(resp: requests.Response) -> bool:
     if "application/pdf" in ct:
         return True
     try:
-        # small peek
-        head = resp.content[:5]
-        return head.startswith(b"%PDF-")
+        return resp.content[:5].startswith(b"%PDF-")
     except Exception:
         return False
 
@@ -61,7 +58,6 @@ def _extract_text_from_pdf_bytes(data: bytes) -> str:
     """
     # 1) Try local helper
     try:
-        # these names are guesses; we try several common variants
         from scraper import pdf_utils as pu  # type: ignore
         for name in ("extract_text_from_bytes", "extract_text_from_pdf_bytes", "extract_text_from_pdf"):
             fn = getattr(pu, name, None)
@@ -88,7 +84,6 @@ def bulletify(text: str, max_bullets: int = 10) -> List[str]:
     Very simple fallback bullet generator for when LLM isn't available.
     """
     lines = [ln.strip(" •-*–\t") for ln in _normalize_ws(text).splitlines() if ln.strip()]
-    # pick lines that look like agenda items
     items = []
     for ln in lines:
         if re.search(r"(^|\s)(item|resolution|ordinance|motion|approve|report|agenda)\b", ln, re.I):
@@ -97,7 +92,6 @@ def bulletify(text: str, max_bullets: int = 10) -> List[str]:
         items = lines
     bullets = []
     for ln in items[: max_bullets * 2]:
-        # trim long lines
         if len(ln) > 240:
             ln = ln[:237] + "..."
         bullets.append("• " + ln)
@@ -116,7 +110,6 @@ def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = M
         return bulletify(text, max_bullets=max_bullets)
 
     try:
-        # Use the lightweight responses client if available; otherwise basic requests to Chat Completions.
         from openai import OpenAI  # type: ignore
         client = OpenAI(api_key=api_key)
         prompt = textwrap.dedent(f"""
@@ -138,7 +131,6 @@ def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = M
             temperature=0.2,
         )
         content = (resp.choices[0].message.content or "").strip()
-        # split into bullets
         raw = [ln.strip() for ln in content.splitlines() if ln.strip()]
         bullets: List[str] = []
         for ln in raw:
@@ -172,7 +164,6 @@ def _fetch_text_url(url: str) -> Tuple[Optional[str], str]:
         r = requests.get(url, timeout=60, headers=UA)
         if r.status_code != 200:
             return None, f"HTTP {r.status_code}"
-        # try to decode as text; fall back to bytes->utf8
         ct = (r.headers.get("Content-Type") or "").lower()
         if "text/plain" in ct or "json" in ct or "text" in ct:
             txt = r.text
@@ -180,7 +171,7 @@ def _fetch_text_url(url: str) -> Tuple[Optional[str], str]:
             try:
                 txt = r.content.decode("utf-8", errors="replace")
             except Exception:
-                txt = r.text  # requests will try decoding
+                txt = r.text
         return _normalize_ws(txt), ""
     except Exception as e:
         return None, f"fetch error: {e!r}"
@@ -231,13 +222,14 @@ def summarize_meeting(meeting: Dict[str, Any]) -> SummaryResult:
     return SummaryResult(False, "no agenda_text_url or usable agenda_url", [], text_url or pdf_url, None, 0)
 
 # ---------------------------
-# CLI
+# CLI + merge
 # ---------------------------
 
-def _load_meetings(path: Path) -> List[Dict[str, Any]]:
-    data = json.loads(path.read_text(encoding="utf-8"))
-    meetings = data.get("meetings") or []
-    return meetings
+def _load_json(path: Path) -> Dict[str, Any]:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+def _write_json(path: Path, payload: Dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 def _write_meta(out_dir: Path, name: str, payload: Dict[str, Any]) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -252,10 +244,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     in_path = Path(args.input)
     out_dir = Path(args.out)
 
-    meetings = _load_meetings(in_path)
+    payload = _load_json(in_path)
+    meetings: List[Dict[str, Any]] = payload.get("meetings") or []
     _log(f"Loaded {len(meetings)} meetings from {in_path}")
 
     produced = 0
+    merged = 0
+
     for idx, m in enumerate(meetings):
         title = (m.get("title") or m.get("meeting") or "Meeting").strip()
         date = (m.get("date") or m.get("meeting_date") or "").strip()
@@ -264,6 +259,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         res = summarize_meeting(m)
 
+        # meta file for debugging / auditing
         meta = {
             "title": title,
             "city": city,
@@ -280,15 +276,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         }
         _write_meta(out_dir, slug, meta)
 
-        if res.ok and res.bullets:
-            produced += 1
+        # --- NEW: merge bullets back into meetings.json for BOTH 'text' and 'pdf' ---
+        if res.ok and res.bullets and res.used_kind in {"text", "pdf"}:
+            m["agenda_summary"] = res.bullets
+            m["agenda_summary_source"] = res.used_kind
+            m["agenda_summary_chars"] = res.chars
+            merged += 1
             if DEBUG:
-                _log(f"✓ {slug}: {len(res.bullets)} bullets ({res.used_kind})")
+                _log(f"✓ {slug}: merged {len(res.bullets)} bullets ({res.used_kind})")
         else:
             if DEBUG:
                 _log(f"✗ {slug}: {res.reason}")
 
-    _log(f"Completed summaries: {produced}/{len(meetings)}")
+        if res.ok and res.bullets:
+            produced += 1
+
+    # write back meetings.json (in place)
+    _write_json(in_path, payload)
+
+    _log(f"Completed summaries: {produced}/{len(meetings)}; merged into meetings.json: {merged}")
     return 0
 
 if __name__ == "__main__":

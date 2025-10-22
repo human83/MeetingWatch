@@ -94,7 +94,7 @@ def bulletify(text: str, max_bullets: int = 10) -> List[str]:
     for ln in items[: max_bullets * 2]:
         if len(ln) > 240:
             ln = ln[:237] + "..."
-        bullets.append("• " + ln)
+        bullets.append(ln)
         if len(bullets) >= max_bullets:
             break
     return bullets
@@ -134,14 +134,12 @@ def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = M
         raw = [ln.strip() for ln in content.splitlines() if ln.strip()]
         bullets: List[str] = []
         for ln in raw:
+            # normalize NBSP -> space and trim
             ln = ln.replace("\u00A0", " ").strip()
-            ln = re.sub(r"^\s*[•\-\*\u2013\u2014\u00B7\u2219]\s+", "• ", ln)
-            if not re.match(r"^\s*•\s+", ln):
-                ln = "• " + ln
+            # REMOVE any leading bullet/dash + spaces
+            ln = re.sub(r"^\s*[•\-\*\u2013\u2014\u00B7\u2219]\s+", "", ln)
+            # DO NOT prepend a bullet; keep as plain sentence
             bullets.append(ln)
-        if not bullets:
-            bullets = bulletify(text, max_bullets=max_bullets)
-        return bullets[:max_bullets]
     except Exception as e:
         if DEBUG:
             _log(f"LLM summarize failed: {e!r}; using fallback")
@@ -279,7 +277,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # --- NEW: merge bullets back into meetings.json for BOTH 'text' and 'pdf' ---
         if res.ok and res.bullets and res.used_kind in {"text", "pdf"}:
-            m["agenda_summary"] = res.bullets
+            clean_bullets = [re.sub(r"^\s*[•\-\*\u2013\u2014\u00B7\u2219]\s+", "", b or "") for b in res.bullets]
+            m["agenda_summary"] = clean_bullets
             m["agenda_summary_source"] = res.used_kind
             m["agenda_summary_chars"] = res.chars
             merged += 1

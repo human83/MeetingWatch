@@ -130,18 +130,7 @@ def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = M
             ],
             temperature=0.2,
         )
-        content = (resp.choices[0].message.content or "").strip()
-        raw = [ln.strip() for ln in content.splitlines() if ln.strip()]
-        bullets: List[str] = []
-        for ln in raw:
-            ln = ln.replace("\u00A0", " ").strip()
-            ln = re.sub(r"^\s*[•\-\*\u2013\u2014\u00B7\u2219]\s+", "• ", ln)
-            if not re.match(r"^\s*•\s+", ln):
-                ln = "• " + ln
-            bullets.append(ln)
-        if not bullets:
-            bullets = bulletify(text, max_bullets=max_bullets)
-        return bullets[:max_bullets]
+        
     except Exception as e:
         if DEBUG:
             _log(f"LLM summarize failed: {e!r}; using fallback")

@@ -94,7 +94,7 @@ def bulletify(text: str, max_bullets: int = 10) -> List[str]:
     for ln in items[: max_bullets * 2]:
         if len(ln) > 240:
             ln = ln[:237] + "..."
-        bullets.append("• " + ln)
+        bullets.append(ln)
         if len(bullets) >= max_bullets:
             break
     return bullets

@@ -47,6 +47,12 @@ def _looks_like_pdf(resp: requests.Response) -> bool:
 
 def _normalize_ws(text: str) -> str:
     return re.sub(r"[ \t]+\n", "\n", re.sub(r"\r\n?", "\n", text))
+    
+_BULLET_PREFIX_RE = re.compile(r"^\s*[•\-\*\u2022]\s*")
+
+def _strip_leading_bullet(s: str) -> str:
+    # remove any leading bullet-like marker and surrounding spaces
+    return _BULLET_PREFIX_RE.sub("", s or "").strip()
 
 # ---------------------------
 # PDF text extraction (prefer project helper if present)
@@ -94,7 +100,7 @@ def bulletify(text: str, max_bullets: int = 10) -> List[str]:
     for ln in items[: max_bullets * 2]:
         if len(ln) > 240:
             ln = ln[:237] + "..."
-        bullets.append(ln)
+        bullets.append("• " + ln)
         if len(bullets) >= max_bullets:
             break
     return bullets
@@ -134,10 +140,9 @@ def llm_summarize(text: str, model: str = SUMMARIZER_MODEL, max_bullets: int = M
         raw = [ln.strip() for ln in content.splitlines() if ln.strip()]
         bullets: List[str] = []
         for ln in raw:
-            ln = re.sub(r"^\s*[-•*]\s*", "• ", ln)
-            if not ln.startswith("• "):
-                ln = "• " + ln
-            bullets.append(ln)
+            ln = _strip_leading_bullet(ln)
+            if ln:
+                bullets.append(ln)
         if not bullets:
             bullets = bulletify(text, max_bullets=max_bullets)
         return bullets[:max_bullets]
@@ -278,7 +283,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # --- NEW: merge bullets back into meetings.json for BOTH 'text' and 'pdf' ---
         if res.ok and res.bullets and res.used_kind in {"text", "pdf"}:
-            m["agenda_summary"] = res.bullets
+            cleaned = [_strip_leading_bullet(b) for b in res.bullets if b and b.strip()]
+            m["agenda_summary"] = cleaned
             m["agenda_summary_source"] = res.used_kind
             m["agenda_summary_chars"] = res.chars
             merged += 1

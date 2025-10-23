@@ -2,7 +2,7 @@ name: Scrape Build Deploy
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "0 6,7,18,19 * * *"  # Denver midnight/noon across DST & Standard
   workflow_dispatch:
   push:
     branches: [ main ]
@@ -30,6 +30,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        
+      - name: Guard: only run at midnight/noon America/Denver
+        run: |
+          HOUR="$(TZ=America/Denver date +%H)"
+          echo "Local hour is $HOUR"
+          if [ "$HOUR" != "00" ] && [ "$HOUR" != "12" ]; then
+            echo "Not midnight/noon MT — stopping early."
+            exit 0
+          fi
 
       - name: Set up Python
         uses: actions/setup-python@v5

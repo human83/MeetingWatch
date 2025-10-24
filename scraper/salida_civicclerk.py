@@ -25,15 +25,20 @@ except Exception:
 SALIDA_ONLY_TODAY_FWD = os.getenv("SALIDA_ONLY_TODAY_FWD", "1") == "1"
 SALIDA_TZ = os.getenv("SALIDA_TZ", "America/Denver")  # Salida is MT
 
-# Keep only City Council items (configurable via env)
+# Keep only City Council (exclude study/work/workshop/retreat sessions)
 SALIDA_ONLY_COUNCIL = os.getenv("SALIDA_ONLY_COUNCIL", "1") == "1"
+
+# Must contain "City Council"
 SALIDA_COUNCIL_ALLOW_RE = re.compile(os.getenv(
     "SALIDA_COUNCIL_ALLOW_RE",
-    r"\bcity\s*council\b|\bcouncil\b"
+    r"\bcity\s*council\b"
 ), re.I)
+
+# Exclude any of these (covers "work session", "worksession", "study session", etc.)
 SALIDA_COUNCIL_BLOCK_RE = re.compile(os.getenv(
     "SALIDA_COUNCIL_BLOCK_RE",
-    r"\bwork\s*session\b|\bworkshop\b|\bhistoric\b|\bcommission\b|\bboard\b"
+    r"(\bwork\s*session\b|\bworksession\b|\bstudy\s*session\b|"
+    r"\bstrategy\s*session\b|\bretreat\b|\bworkshop\b)"
 ), re.I)
 
 CITY_NAME = "Salida"
@@ -570,13 +575,24 @@ def parse_salida() -> List[Dict]:
                 m for m in unique
                 if (m.get("date") or "") >= cutoff
             ]
-        # --- Keep only City Council meetings ---
+        # --- Keep only City Council meetings, not sessions ---
         if SALIDA_ONLY_COUNCIL:
-            unique = [
-                m for m in unique
-                if SALIDA_COUNCIL_ALLOW_RE.search((m.get("title") or "")) 
-                and not SALIDA_COUNCIL_BLOCK_RE.search((m.get("title") or ""))
-            ]
+            def _is_council_meeting(title: str) -> bool:
+                t = (title or "").strip()
+                if not t:
+                    return False
+                # must say "City Council"
+                if not SALIDA_COUNCIL_ALLOW_RE.search(t):
+                    return False
+                # exclude any work/study/workshop/retreat "session" variants
+                if SALIDA_COUNCIL_BLOCK_RE.search(t):
+                    return False
+                # extra catch: patterns like "City Council - Work Session"
+                if re.search(r"\bwork\b.*\bsession\b", t, re.I):
+                    return False
+                return True
+
+            unique = [m for m in unique if _is_council_meeting(m.get("title"))]
 
     for m in unique:
         u = (m.get("url") or "").strip()

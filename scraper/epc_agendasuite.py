@@ -209,6 +209,10 @@ def parse_epc() -> List[Dict]:
     return accepted
 
 
+def parse_bocc() -> List[Dict]:
+    return parse_epc()
+
+
 def parse() -> List[Dict]:
     return parse_epc()
 

@@ -31,16 +31,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         
-      - name: Guard: only run at midnight/noon America/Denver
+      - name: "Guard — only run at midnight/noon America/Denver"
+        id: guard
+        shell: bash
         run: |
           HOUR="$(TZ=America/Denver date +%H)"
           echo "Local hour is $HOUR"
-          if [ "$HOUR" != "00" ] && [ "$HOUR" != "12" ]; then
-            echo "Not midnight/noon MT — stopping early."
-            exit 0
+          if [ "$HOUR" = "00" ] || [ "$HOUR" = "12" ]; then
+            echo "continue=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "continue=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Set up Python
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -57,9 +61,11 @@ jobs:
           fi
           
       - name: Install Playwright browsers
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: python -m playwright install --with-deps chromium    
 
       - name: Print effective PDF limits
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: |
           python - <<'PY'
           import os
@@ -73,19 +79,23 @@ jobs:
           PY
 
       - name: Clear agenda summary cache
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: rm -rf data/cache/agenda_summaries || true
         
       - name: Debug hosts
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: |
           echo "SALIDA_CIVICCLERK_URL=${SALIDA_CIVICCLERK_URL}"
           echo "SALIDA_CIVICCLERK_ALT_HOSTS=${SALIDA_CIVICCLERK_ALT_HOSTS}"  
 
       - name: Run scraper
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: |
           python -m scraper.main
           test -d data && ls -la data || (echo "no data dir generated" && exit 1)
       # --- Summarize agendas (this generates the bullets) ---
       - name: Summarize agendas (GPT)
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           SUMMARIZER_MODEL: ${{ env.SUMMARIZER_MODEL }}
@@ -104,12 +114,14 @@ jobs:
           head -n 80 $(ls data/cache/agenda_summaries/*.meta.json | head -n1) || true
 
       - name: "Sanity check: did we produce any bullets?"
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: |
           n=$(grep -H '"merged": [1-9][0-9]*' data/cache/agenda_summaries/*.meta.json 2>/dev/null | wc -l || true)
           echo "Summaries with merged bullets: ${n}"
           test "${n}" -gt 0
 
       - name: Upload data artifact (data/)
+        if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: scrape-data
@@ -118,6 +130,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     needs: scrape
+    if: ${{ github.event_name != 'schedule' || needs.scrape.outputs.should_run == 'true' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -224,11 +237,12 @@ jobs:
           path: _site
 
   deploy:
+    needs: build
+    if: ${{ github.event_name != 'schedule' || needs.scrape.outputs.should_run == 'true' }}
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
-    needs: build
     steps:
       - name: Deploy to GitHub Pages
         id: deployment

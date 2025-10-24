@@ -1,87 +1,218 @@
-import re, requests
+
+from __future__ import annotations
+
+import re
+from datetime import datetime, date
+from typing import Dict, List, Optional
+from urllib.parse import urljoin
+
+import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
-from .utils import make_meeting, clean_text, to_mt, is_future
-from .summarize import llm_summarize
-from .pdf_utils import extract_pdf_text
-import tempfile, os
 
+CITY_NAME = "El Paso County"
+PROVIDER = "AgendaSuite"
 BASE = "https://www.agendasuite.org/iip/elpaso"
+UA = {"User-Agent": "MeetingWatch/1.0 (+https://github.com/human83/MeetingWatch)"}
 
-def parse_bocc():
-    out = []
-    r = requests.get(BASE, timeout=30)
+# Regex examples seen on the homepage list, e.g.:
+# "10/28/2025 at 9:00 AM for Board of County Commissioners"
+DT_RE = re.compile(
+    r"(?P<mdy>\d{1,2}/\d{1,2}/\d{4})\s+at\s+(?P<time>\d{1,2}:\d{2}\s*[AP]M)",
+    re.I,
+)
+
+# We only want "Board of County Commissioners" (exclude work sessions, study sessions, etc.)
+ALLOW_TITLE_RE = re.compile(r"\bBoard of County Commissioners\b", re.I)
+BLOCK_TITLE_RE = re.compile(r"\bWork\s*Session|Study\s*Session|Workshop|Retreat\b", re.I)
+
+
+def _get(url: str) -> requests.Response:
+    r = requests.get(url, headers=UA, timeout=30)
     r.raise_for_status()
+    return r
+
+
+def _today_iso_denver() -> str:
+    try:
+        from zoneinfo import ZoneInfo  # py3.9+
+        return datetime.now(ZoneInfo("America/Denver")).date().isoformat()
+    except Exception:
+        return date.today().isoformat()
+
+
+def _parse_list_datetime(text: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Parse the "MM/DD/YYYY at HH:MM AM/PM" pattern from homepage list.
+    Return (YYYY-MM-DD, time_str) where time_str is e.g., '9:00 AM'.
+    """
+    m = DT_RE.search(text or "")
+    if not m:
+        return None, None
+    mdy = m.group("mdy")
+    tm = m.group("time").upper().replace("  ", " ").strip()
+    try:
+        mm, dd, yyyy = [int(x) for x in mdy.split("/")]
+        return f"{yyyy:04d}-{mm:02d}-{dd:02d}", tm
+    except Exception:
+        return None, tm
+
+
+def _text(n) -> str:
+    return re.sub(r"\s+", " ", (getattr(n, "get_text", lambda **_: str(n))() or "").strip())
+
+
+def _find_location(soup: BeautifulSoup) -> Optional[str]:
+    # Look for "Held at: XYZ"
+    text = _text(soup)
+    m = re.search(r"Held at:\s*([^\\n\\r]+)", text, re.I)
+    if m:
+        loc = m.group(1).strip(" :-")
+        return loc[:200]
+    return None
+
+
+def _find_agenda_href(soup: BeautifulSoup) -> Optional[str]:
+    # Priority order: explicit "Agenda" link, then any /file/getfile/<id> link
+    # AgendaSuite often renders as: <a aria-label="Agenda" href="/iip/elpaso/file/getfile/50721">...</a>
+    # or a table row with text "Agenda" and a PDF icon in the Download column.
+    # 1) aria/label/text contains "Agenda"
+    for a in soup.find_all("a"):
+        label = (a.get("aria-label") or "") + " " + _text(a)
+        if re.search(r"\bagenda\b", label, re.I):
+            href = a.get("href") or ""
+            if "/file/getfile/" in href:
+                return urljoin(BASE, href)
+
+    # 2) attachments table rows
+    for tr in soup.select("table tr"):
+        row_text = _text(tr)
+        if re.search(r"\bagenda\b", row_text, re.I):
+            a = tr.find("a", href=True)
+            if a and "/file/getfile/" in a["href"]:
+                return urljoin(BASE, a["href"])
+
+    # 3) any getfile link as a fallback
+    a = soup.find("a", href=re.compile(r"/file/getfile/"))
+    if a:
+        return urljoin(BASE, a.get("href") or "")
+
+    return None
+
+
+def _meeting_title_from_detail(soup: BeautifulSoup) -> Optional[str]:
+    # Try to use the big heading line that contains "Board of County Commissioners"
+    # (and avoid "Work Session" variants).
+    texts = []
+    for tag in soup.find_all(["h1", "h2", "h3", "div", "span"]):
+        t = _text(tag)
+        if ALLOW_TITLE_RE.search(t):
+            texts.append(t)
+    if texts:
+        # Prefer the shortest that still contains the phrase (usually "Board of County Commissioners" or "... Meeting")
+        texts.sort(key=len)
+        t = texts[0]
+        # Drop 'Work Session' etc if present.
+        t = BLOCK_TITLE_RE.sub("", t).strip(" -—:")
+        return t[:150]
+
+    # Fallback
+    return "Board of County Commissioners"
+
+
+def _extract_detail_info(detail_url: str) -> Dict[str, Optional[str]]:
+    r = _get(detail_url)
     soup = BeautifulSoup(r.text, "html.parser")
-    # Find meeting links in "Meetings" listing
-    for a in soup.select("a[href*='/meeting/details/']"):
-        href = a.get("href")
-        if not href: 
+
+    agenda_url = _find_agenda_href(soup)
+    location = _find_location(soup)
+    title = _meeting_title_from_detail(soup)
+
+    return {
+        "agenda_url": agenda_url,
+        "location": location,
+        "title": title,
+    }
+
+
+def _discover_from_homepage() -> List[Dict]:
+    r = _get(BASE)
+    soup = BeautifulSoup(r.text, "html.parser")
+
+    items: List[Dict] = []
+    # The "Upcoming meetings" box appears in a column with class "nextmeetings"
+    # Each li contains an <a href="/iip/elpaso/meeting/details/<id>">MM/DD/YYYY at HH:MM AM/PM for Board of County Commissioners</a>
+    for a in soup.select("div.nextmeetings a[href]"):
+        t = _text(a)
+        href = a.get("href") or ""
+        if not href:
             continue
-        url = href if href.startswith("http") else (BASE.rstrip("/") + "/" + href.lstrip("/"))
-        title = a.get_text(strip=True)
-        if not re.search(r"Board of County Commissioners", title, re.I):
+
+        # Keep only BOCC regular meetings; exclude "Work Session" etc.
+        if not ALLOW_TITLE_RE.search(t):
             continue
-        # Go into details page
-        rd = requests.get(url, timeout=30)
-        if rd.status_code != 200:
+        if BLOCK_TITLE_RE.search(t):
             continue
-        ds = BeautifulSoup(rd.text, "html.parser")
-        # Parse date/time (often in a panel)
-        dt_txt = ""
-        time_node = ds.find(string=re.compile(r"\d{1,2}/\d{1,2}/\d{4}"))
-        if time_node:
-            dt_txt = time_node.strip()
-        # Try a fallback: find an element with class 'meeting-date' etc.
-        mdt = None
-        for cand in ds.find_all(text=True):
-            if re.search(r"\d{1,2}/\d{1,2}/\d{4}", cand):
-                mdt = cand.strip()
-                break
-        # Very loose parse
+
+        iso, time_str = _parse_list_datetime(t)
+        if not iso:
+            # If the homepage text isn't in the expected format, skip.
+            continue
+
+        # Only current day & future
+        if iso < _today_iso_denver():
+            continue
+
+        detail = urljoin(BASE, href)
+        items.append({
+            "city": CITY_NAME,
+            "provider": PROVIDER,
+            "title": "Board of County Commissioners",  # will refine after detail fetch
+            "date": iso,
+            "time": time_str or "",
+            "url": detail,
+            "source": BASE,
+        })
+
+    return items
+
+
+def parse_epc() -> List[Dict]:
+    items = _discover_from_homepage()
+    accepted: List[Dict] = []
+
+    for m in items:
         try:
-            dt = datetime.strptime(re.search(r"\d{1,2}/\d{1,2}/\d{4}", mdt).group(0) + " 9:00 AM", "%m/%d/%Y %I:%M %p")
-            dt = to_mt(dt)
+            info = _extract_detail_info(m["url"])
+            # Update title if we have a better one and still not a work session.
+            t = info.get("title") or m.get("title") or ""
+            if BLOCK_TITLE_RE.search(t or ""):
+                # Safety: drop if detail page shows it's a work session.
+                continue
+
+            m["title"] = t or "Board of County Commissioners"
+            if info.get("location"):
+                m["location"] = info["location"]
+            if info.get("agenda_url"):
+                m["agenda_url"] = info["agenda_url"]
+
+            # Provide a consistent Mountain Time zone for downstream rendering if your pipeline uses it.
+            m["tz"] = "America/Denver"
+
+            accepted.append(m)
         except Exception:
+            # Skip malformed entries silently; upstream logs will show traceback if needed.
             continue
-        if not is_future(dt):
-            continue
-        # Agenda attachment
-        agenda_url = None
-        for a2 in ds.select("a[href]"):
-            txt = a2.get_text(" ", strip=True)
-            if re.search(r"Agenda", txt, re.I):
-                agenda_url = a2["href"]
-                if not agenda_url.startswith("http"):
-                    agenda_url = BASE.rstrip("/") + "/" + agenda_url.lstrip("/")
-                break
-        status = "Agenda posted" if agenda_url else "Agenda not yet posted"
-        summary = "Agenda not posted yet"
-        if agenda_url and agenda_url.lower().endswith(".pdf"):
-            try:
-                pr = requests.get(agenda_url, timeout=30)
-                pr.raise_for_status()
-                import tempfile, os
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tf:
-                    tf.write(pr.content)
-                    tf.flush()
-                    text = extract_pdf_text(tf.name)
-                os.unlink(tf.name)
-                bullets = llm_summarize(text, max_bullets=8)
-                summary = bullets
-            except Exception:
-                summary = "Agenda available but could not be summarized"
-        elif agenda_url:
-            summary = "Agenda available"
-        out.append(make_meeting(
-            city_or_body="El Paso County — Board of County Commissioners",
-            meeting_type="Regular Meeting",
-            date=dt.strftime("%Y-%m-%d"),
-            start_time_local=dt.strftime("%-I:%M %p"),
-            location=None,
-            agenda_url=agenda_url,
-            status=status,
-            agenda_summary=summary,
-            source_url=url
-        ))
-    return out
+
+    with_pdf = sum(1 for x in accepted if x.get("agenda_url"))
+    print(f"[epc] Visited 1 entry url; accepted {len(accepted)} BOCC item(s); with agenda: {with_pdf}")
+
+    return accepted
+
+
+def parse() -> List[Dict]:
+    return parse_epc()
+
+
+if __name__ == "__main__":
+    for it in parse_epc():
+        print(" -", it.get("date"), it.get("time"), it.get("title"), "->", it.get("url"))

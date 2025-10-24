@@ -15,6 +15,15 @@ try:
     from playwright.sync_api import sync_playwright
 except Exception:  # pragma: no cover
     sync_playwright = None
+    
+from datetime import datetime
+try:
+    from zoneinfo import ZoneInfo  # py>=3.9
+except Exception:
+    ZoneInfo = None
+
+SALIDA_ONLY_TODAY_FWD = os.getenv("SALIDA_ONLY_TODAY_FWD", "1") == "1"
+SALIDA_TZ = os.getenv("SALIDA_TZ", "America/Denver")  # Salida is MT
 
 CITY_NAME = "Salida"
 PROVIDER = "CivicClerk"
@@ -504,6 +513,12 @@ def _hosts_to_try() -> Iterable[str]:
             seen.add(h)
             yield h
 
+def _today_iso_in_tz(tz_name: str) -> str:
+    if ZoneInfo is not None:
+        return datetime.now(ZoneInfo(tz_name)).date().isoformat()
+    # Fallback to system local date if zoneinfo not available
+    return datetime.now().date().isoformat()
+
 def parse_salida() -> List[Dict]:
     tried_urls: List[str] = []
     discovered: List[Dict] = []
@@ -537,6 +552,13 @@ def parse_salida() -> List[Dict]:
         if key not in seen:
             seen.add(key)
             unique.append(m)
+        # --- Keep only today-and-future for Salida ---
+        if SALIDA_ONLY_TODAY_FWD:
+            cutoff = _today_iso_in_tz(SALIDA_TZ)
+            unique = [
+                m for m in unique
+                if (m.get("date") or "") >= cutoff
+            ]
 
     for m in unique:
         u = (m.get("url") or "").strip()

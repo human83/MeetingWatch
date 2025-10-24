@@ -28,11 +28,11 @@ SALIDA_TZ = os.getenv("SALIDA_TZ", "America/Denver")  # Salida is MT
 # Only keep City Council meetings; exclude work/study/workshop/retreat sessions
 SALIDA_ONLY_COUNCIL = os.getenv("SALIDA_ONLY_COUNCIL", "1") == "1"
 
-# Allow if it looks like a council meeting (city optional, "meeting" required)
-# Matches: "City Council Meeting", "Council Regular Meeting", etc.
+# Allow if it looks like a council item (city optional)
+# (We no longer require the word "meeting" here.)
 SALIDA_COUNCIL_ALLOW_RE = re.compile(os.getenv(
     "SALIDA_COUNCIL_ALLOW_RE",
-    r"\b(?:city\s+)?council\b.*\bmeeting\b"
+    r"\b(?:city\s+)?council\b"
 ), re.I)
 
 # Block common non-meeting council sessions (handles "worksession", hyphens, etc.)
@@ -149,6 +149,10 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
             iso = _parse_date(dtxt)
             if iso:
                 break
+
+        # If we still don't have a date, try the entire tile's text
+        if not iso:
+            iso = _parse_date(_extract_text(tag))
 
         title = _extract_text(tag) or "Meeting"
 

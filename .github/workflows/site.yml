@@ -2,7 +2,7 @@ name: Scrape Build Deploy
 
 on:
   schedule:
-    - cron: "0 6,7,18,19 * * *"  # Denver midnight/noon across DST & Standard
+    - cron: "3,33 6,7,18,19 * * *"  # Denver midnight/noon across DST & Standard
   workflow_dispatch:
   push:
     branches: [ main ]
@@ -19,6 +19,10 @@ env:
   PDF_SUMMARY_MAX_CHARS: '72000'
   PDF_SUMMARY_MAX_BULLETS: '16'
   PDF_SUMMARY_DEBUG: '1'
+  
+concurrency:
+  group: daily-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   scrape:
@@ -30,6 +34,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        
+      - name: Cron heartbeat
+        run: |
+          echo "event=${{ github.event_name }}"
+          echo "utc=$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "denver=$(TZ=America/Denver date '+%Y-%m-%d %H:%M:%S %Z')"
         
       - name: "Guard — only run at midnight/noon America/Denver"
         id: guard

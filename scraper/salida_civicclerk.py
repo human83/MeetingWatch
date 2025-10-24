@@ -25,6 +25,17 @@ except Exception:
 SALIDA_ONLY_TODAY_FWD = os.getenv("SALIDA_ONLY_TODAY_FWD", "1") == "1"
 SALIDA_TZ = os.getenv("SALIDA_TZ", "America/Denver")  # Salida is MT
 
+# Keep only City Council items (configurable via env)
+SALIDA_ONLY_COUNCIL = os.getenv("SALIDA_ONLY_COUNCIL", "1") == "1"
+SALIDA_COUNCIL_ALLOW_RE = re.compile(os.getenv(
+    "SALIDA_COUNCIL_ALLOW_RE",
+    r"\bcity\s*council\b|\bcouncil\b"
+), re.I)
+SALIDA_COUNCIL_BLOCK_RE = re.compile(os.getenv(
+    "SALIDA_COUNCIL_BLOCK_RE",
+    r"\bwork\s*session\b|\bworkshop\b|\bhistoric\b|\bcommission\b|\bboard\b"
+), re.I)
+
 CITY_NAME = "Salida"
 PROVIDER = "CivicClerk"
 
@@ -558,6 +569,13 @@ def parse_salida() -> List[Dict]:
             unique = [
                 m for m in unique
                 if (m.get("date") or "") >= cutoff
+            ]
+        # --- Keep only City Council meetings ---
+        if SALIDA_ONLY_COUNCIL:
+            unique = [
+                m for m in unique
+                if SALIDA_COUNCIL_ALLOW_RE.search((m.get("title") or "")) 
+                and not SALIDA_COUNCIL_BLOCK_RE.search((m.get("title") or ""))
             ]
 
     for m in unique:

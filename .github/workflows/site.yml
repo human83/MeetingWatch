@@ -27,6 +27,8 @@ concurrency:
 jobs:
   scrape:
     runs-on: ubuntu-24.04
+    outputs:
+      should_run: ${{ steps.guard.outputs.continue }}
     env:
       SALIDA_CIVICCLERK_URL: https://salidaco.portal.civicclerk.com
       SALIDA_CIVICCLERK_ALT_HOSTS: https://salidaco.portal.civicclerk.com,https://salidaco.civicclerk.com,https://cityofsalida.civicclerk.com
@@ -42,6 +44,7 @@ jobs:
           echo "denver=$(TZ=America/Denver date '+%Y-%m-%d %H:%M:%S %Z')"
         
       - name: "Guard — only run at midnight/noon America/Denver"
+        if: ${{ github.event_name == 'schedule' }}
         id: guard
         shell: bash
         run: |

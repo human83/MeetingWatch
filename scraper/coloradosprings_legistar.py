@@ -225,6 +225,7 @@ def parse_legistar() -> List[Dict]:
     """
     today = datetime.now(MT).date()
     in_120 = today + timedelta(days=120)
+    
     # Collect from *today* at 00:00 forward (no past days)
     start = today.strftime("%Y-%m-%dT00:00:00")
     end = in_120.strftime("%Y-%m-%dT23:59:59")
@@ -260,13 +261,13 @@ def parse_legistar() -> List[Dict]:
         date_str = (ev.get("EventDate") or "").split("T")[0]
          if not date_str:
              continue
-+        # Guardrail: enforce today-and-future only
-+        try:
-+            event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-+            if event_date < today:
-+                continue
-+        except Exception:
-+            continue
+         # Guardrail: enforce today-and-future only
+         try:
+             event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+             if event_date < today:
+                 continue
+         except Exception:
+             continue
 
         # 1) EventTime (string '6:00 PM' or int minutes) if present
         start_time_local = _parse_time_field(ev.get("EventTime"))

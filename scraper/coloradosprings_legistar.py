@@ -259,15 +259,15 @@ def parse_legistar() -> List[Dict]:
             continue
 
         date_str = (ev.get("EventDate") or "").split("T")[0]
-         if not date_str:
-             continue
-         # Guardrail: enforce today-and-future only
-         try:
-             event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-             if event_date < today:
-                 continue
-         except Exception:
-             continue
+        if not date_str:
+            continue
+        # Guardrail: enforce today-and-future only
+        try:
+            event_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            if event_date < today:
+                continue
+        except Exception:
+            continue
 
         # 1) EventTime (string '6:00 PM' or int minutes) if present
         start_time_local = _parse_time_field(ev.get("EventTime"))

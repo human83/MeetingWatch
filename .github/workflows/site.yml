@@ -102,6 +102,8 @@ jobs:
           echo "SALIDA_CIVICCLERK_ALT_HOSTS=${SALIDA_CIVICCLERK_ALT_HOSTS}"  
 
       - name: Run scraper
+        env:
+          DEBUG: "1"
         if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: |
           python -m scraper.main

@@ -1,8 +1,8 @@
 # scraper/alamosa_diligent.py
 from __future__ import annotations
 
+import os
 import re
-import time
 import logging
 from datetime import datetime, date
 from typing import List, Dict, Optional, Tuple, Set
@@ -15,8 +15,9 @@ from .utils import make_meeting, summarize_pdf_if_any
 
 MT = pytz.timezone("America/Denver")
 _LOG = logging.getLogger(__name__)
+_DBG = os.getenv("DEBUG", "").strip() not in ("", "0", "false", "False")
 
-# Calendar landing page that lists Alamosa City Council meetings
+# Landing page that lists City Council meetings (tabs/links lead to dated pages)
 PORTAL_URL = "https://cityofalamosa.diligent.community/Portal/MeetingInformation.aspx?Org=Cal&Id=107"
 
 # Allow only these meeting types
@@ -34,24 +35,28 @@ EXCLUDE_TYPES = (
     "AUTHORITY",
 )
 
-# ---- helpers -----------------------------------------------------------------
-
 def _norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
+def _today_denver() -> date:
+    return datetime.now(MT).date()
+
+def _is_allowed(kind: str) -> bool:
+    k = (kind or "").upper()
+    if not any(k.startswith(a) or a in k for a in ALLOW_TYPES):
+        return False
+    if any(ex in k for ex in EXCLUDE_TYPES):
+        return False
+    return True
+
 def _parse_title_and_date(page_text: str) -> Tuple[Optional[str], Optional[date]]:
     """
-    The detail page shows a large header like:
+    The detail page shows a header like:
       CITY COUNCIL SPECIAL MEETING - OCT 29 2025
-    Return a normalized type and a datetime.date if found.
     """
     txt = _norm_space(page_text).upper()
-    # quick guard against schedule tiles text (we only want detail pages)
-    if "SCHEDULE OF MEETINGS" in txt and "TODAY" in txt and "CITY COUNCIL" in txt and "-" not in txt:
-        # this is a tile list, not the detail header
-        return None, None
 
-    # prefer patterns "CITY COUNCIL SPECIAL MEETING - OCT 29 2025"
+    # Prefer "TYPE - MON DD YYYY"
     m = re.search(r"(CITY COUNCIL [A-Z ]+?)\s*-\s*([A-Z]{3}\s+\d{1,2}\s+\d{4})", txt)
     if m:
         kind = m.group(1).strip()
@@ -62,8 +67,8 @@ def _parse_title_and_date(page_text: str) -> Tuple[Optional[str], Optional[date]
         except ValueError:
             pass
 
-    # fallback: separate "CITY COUNCIL X MEETING" and later a date token
-    m2 = re.search(r"(CITY COUNCIL [A-Z ]+?MEETING)[^A-Z0-9]{0,40}([A-Z]{3}\s+\d{1,2}\s+\d{4})", txt)
+    # Fallback: separated type then date later in the page
+    m2 = re.search(r"(CITY COUNCIL [A-Z ]+?MEETING)[^A-Z0-9]{0,60}([A-Z]{3}\s+\d{1,2}\s+\d{4})", txt)
     if m2:
         kind = m2.group(1).strip()
         when = m2.group(2).strip()
@@ -87,30 +92,60 @@ def _parse_time_and_location(info_text: str) -> Tuple[Optional[str], Optional[st
         loc = m.group(1).strip()
     return t, loc
 
-def _is_allowed(kind: str) -> bool:
-    k = (kind or "").upper()
-    if not any(k.startswith(a) or a in k for a in ALLOW_TYPES):
-        return False
-    if any(ex in k for ex in EXCLUDE_TYPES):
-        return False
-    return True
-
-def _today_denver() -> date:
-    return datetime.now(MT).date()
-
 def _abs(base: str, href: str) -> str:
     return urljoin(base, href)
 
-# ---- main entry ---------------------------------------------------------------
+def _collect_meeting_links(page) -> List[str]:
+    """
+    Gather candidate links to specific meeting detail pages from multiple spots.
+    """
+    candidates: List[str] = []
+
+    # 1) Anything that obviously navigates to a specific meeting detail:
+    sel_any_meeting = "a[href*='Portal/MeetingInformation.aspx?Org=Cal&Id=']"
+    try:
+        page.wait_for_selector(sel_any_meeting, timeout=20_000)
+    except Exception:
+        pass
+    for a in page.locator(sel_any_meeting).all():
+        href = a.get_attribute("href")
+        if href:
+            candidates.append(href)
+
+    # 2) “Today’s Meetings” / “Upcoming Meetings” sidebars use .list-link
+    for a in page.locator("a.list-link").all():
+        href = a.get_attribute("href")
+        if href and "MeetingInformation.aspx?Org=Cal&Id=" in href:
+            candidates.append(href)
+
+    # 3) Sometimes tiles use div.item-content.list .list-link
+    for a in page.locator("div.item-content.list a.list-link").all():
+        href = a.get_attribute("href")
+        if href and "MeetingInformation.aspx?Org=Cal&Id=" in href:
+            candidates.append(href)
+
+    # De-dup & absolutize
+    seen: Set[str] = set()
+    uniq: List[str] = []
+    for h in candidates:
+        abs_h = _abs(PORTAL_URL, h)
+        if abs_h not in seen:
+            seen.add(abs_h)
+            uniq.append(abs_h)
+
+    if _DBG:
+        print(f"[alamosa] collected raw links: {len(candidates)} -> unique: {len(uniq)}")
+        for u in uniq[:12]:
+            print("   ", u)
+
+    return uniq
 
 def parse_alamosa(headless: bool = True) -> List[Dict]:
     """
-    Scrape the Alamosa Diligent portal for today/future City Council
-    Regular or Special meetings. Returns a list of meeting dicts created
-    with make_meeting().
+    Scrape Alamosa Diligent for today/future City Council Regular/Special meetings.
     """
     items: List[Dict] = []
-    seen: Set[Tuple[str, str, str]] = set()  # (date, time, pdf_url)
+    seen_keys: Set[Tuple[str, str, str]] = set()
 
     with sync_playwright() as pw:
         browser = pw.chromium.launch(
@@ -128,127 +163,112 @@ def parse_alamosa(headless: bool = True) -> List[Dict]:
         _LOG.info("[alamosa] goto %s", PORTAL_URL)
         page.goto(PORTAL_URL, wait_until="load", timeout=60_000)
 
-        # Collect candidate links to specific meeting pages.
-        candidates: List[str] = []
-
-        # Primary selector: sidebar "Today/Upcoming" lists
+        # Let the portal finish hydrating client-side content.
         try:
-            links = page.locator("a.list-link[href*='MeetingInformation.aspx?Org=Cal&Id=']").all()
-            for a in links:
-                href = a.get_attribute("href")
-                if href:
-                    candidates.append(_abs(PORTAL_URL, href))
-        except PWTimeout:
+            page.wait_for_load_state("networkidle", timeout=15_000)
+        except Exception:
             pass
 
-        # Fallback: click visible "UPCOMING MEETINGS" tiles and harvest their links
-        if not candidates:
-            print("[alamosa] No hrefs; falling back to scanning tiles")
-            tiles = page.locator("div.item-content.list .list-link, div.item-content.list a.list-link").all()
-            for t in tiles:
-                href = t.get_attribute("href")
-                if href:
-                    candidates.append(_abs(PORTAL_URL, href))
+        links = _collect_meeting_links(page)
+        if not links:
+            # One more try after a short delay, some portals hydrate slowly
+            page.wait_for_timeout(1500)
+            links = _collect_meeting_links(page)
 
-        # Dedup candidates while preserving order
-        seen_href: Set[str] = set()
-        uniq: List[str] = []
-        for h in candidates:
-            if h not in seen_href:
-                seen_href.add(h)
-                uniq.append(h)
+        if _DBG:
+            print(f"[alamosa] Found candidate hrefs: {len(links)}")
 
-        print(f"[alamosa] Found candidate hrefs: {len(uniq)}")
         visited = accepted = 0
-
-        for href in uniq:
+        for href in links:
             visited += 1
             try:
                 page.goto(href, wait_until="domcontentloaded", timeout=60_000)
+                try:
+                    page.wait_for_load_state("networkidle", timeout=10_000)
+                except Exception:
+                    pass
             except PWTimeout:
-                print(f"[alamosa] Skip: timeout loading {href}")
+                if _DBG:
+                    print(f"[alamosa] timeout loading {href}")
                 continue
 
-            # Read the whole visible content text to find title + date
+            # Extract all visible text once for parsing
             try:
-                header_text = page.locator("main, body").inner_text(timeout=10_000)
+                txt = page.locator("main").inner_text(timeout=10_000)
             except Exception:
                 try:
-                    header_text = page.locator("#content, #container").inner_text(timeout=5_000)
+                    txt = page.locator("#content, #container").inner_text(timeout=5_000)
                 except Exception:
-                    header_text = page.inner_text("body")
+                    txt = page.inner_text("body")
 
-            kind, day = _parse_title_and_date(header_text)
+            kind, day = _parse_title_and_date(txt)
             if not kind or not day:
-                print(f"[alamosa] Skip: could not parse date (header={header_text[:80]!r}…)")
+                if _DBG:
+                    head = _norm_space(txt)[:120]
+                    print(f"[alamosa] Skip: could not parse header/date @ {href} :: {head!r}")
                 continue
 
             if not _is_allowed(kind):
-                print(f"[alamosa] Skip: filtered out by type: {kind}")
+                if _DBG:
+                    print(f"[alamosa] Skip by type: {kind}")
                 continue
 
-            # Extract time/location
-            time_str, location = _parse_time_and_location(header_text)
-
-            # Today/future filter
             if day < _today_denver():
-                print(f"[alamosa] Skip past date: {day.isoformat()}")
+                if _DBG:
+                    print(f"[alamosa] Skip past date: {day.isoformat()}")
                 continue
+
+            time_str, location = _parse_time_and_location(txt)
 
             # Agenda PDF link
             pdf_url = None
             try:
-                # The portal uses a link with id document-cover-pdf to the single-file agenda
-                doc = page.locator("a#document-cover-pdf, a[id*='document'][href*='document/']").first
-                if doc and doc.count() > 0:
-                    h = doc.get_attribute("href")
+                btn = page.locator("a#document-cover-pdf, a[id*='document'][href*='/document/']").first
+                if btn and btn.count() > 0:
+                    h = btn.get_attribute("href")
                     if h:
                         pdf_url = _abs(href, h)
             except Exception:
                 pass
 
-            # If no explicit agenda link on this tab, also scan for "Agenda" link text to a document
             if not pdf_url:
                 try:
-                    link = page.locator("a:has-text('Agenda')").first
-                    if link and link.count() > 0:
-                        h = link.get_attribute("href")
+                    a = page.locator("a:has-text('Agenda')").first
+                    if a and a.count() > 0:
+                        h = a.get_attribute("href")
                         if h:
                             pdf_url = _abs(href, h)
                 except Exception:
                     pass
 
-            # Summarize if we have a PDF
-            agenda_summary = None
-            if pdf_url:
-                agenda_summary = summarize_pdf_if_any(pdf_url)
+            agenda_summary = summarize_pdf_if_any(pdf_url) if pdf_url else None
 
-            # Build meeting dict
             city = "Alamosa — City Council"
             title = kind.title()
             date_str = day.isoformat()
-            # prefer the actual time, otherwise blank
             t_str = time_str or ""
 
-            dedup_key = (date_str, t_str, pdf_url or "")
-            if dedup_key in seen:
+            key = (date_str, t_str, pdf_url or "")
+            if key in seen_keys:
                 continue
-            seen.add(dedup_key)
+            seen_keys.add(key)
 
-            item = make_meeting(
-                city=city,
-                title=title,
-                date=date_str,
-                time=t_str,
-                location=location or "",
-                agenda_url=pdf_url,
-                agenda_summary=agenda_summary,
-                source=href,
+            items.append(
+                make_meeting(
+                    city=city,
+                    title=title,
+                    date=date_str,
+                    time=t_str,
+                    location=location or "",
+                    agenda_url=pdf_url,
+                    agenda_summary=agenda_summary,
+                    source=href,
+                )
             )
-            items.append(item)
             accepted += 1
 
-        print(f"[alamosa] Visited {visited} candidates; accepted {accepted} items")
+        if _DBG:
+            print(f"[alamosa] Visited {visited} candidates; accepted {accepted} items")
 
         context.close()
         browser.close()

@@ -1,113 +1,75 @@
 # scraper/alamosa_diligent.py
 from __future__ import annotations
 
-"""
-Alamosa Diligent Community scraper (v1.2)
-- More tolerant discovery of meeting detail links
-- Falls back to clicking visible tiles if hrefs are scarce
-- Validates "Regular" in the detail header/title (not list tile)
-- Robust date parsing (several formats)
-- Today/future filter (America/Denver)
-- Deduplication by (date, time, type, pdf)
-- CI-friendly Chromium launch flags
-- Emits concise debug prints so we can see what's happening in Actions logs
-"""
-
-import re
 import logging
+import re
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import pytz
-from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+from playwright.sync_api import TimeoutError as PWTimeout, sync_playwright
 
 from .utils import make_meeting, summarize_pdf_if_any
 
 MT = pytz.timezone("America/Denver")
 _LOG = logging.getLogger(__name__)
 
-PORTAL_URL = "https://cityofalamosa.diligent.community/Portal/MeetingInformation.aspx?Org=Cal&Id=107"
+PORTAL_URL = (
+    "https://cityofalamosa.diligent.community/Portal/MeetingInformation.aspx?Org=Cal&Id=107"
+)
 
-# Patterns we consider as "Regular"
-REGULAR_PATTERNS = [
-    r"\bregular\b",
-    r"\bregular meeting\b",
-    r"\bcity council regular\b",
-]
-
-def _is_regular_text(text: str) -> bool:
-    t = text.lower()
-    if "city council" not in t:
-        return False
-    return any(re.search(p, t) for p in REGULAR_PATTERNS)
+# We only accept City Council Regular or Special meetings
+TYPE_PATTERNS = {
+    "City Council Regular Meeting": [r"\bcity council\b.*\bregular\b", r"\bregular meeting\b"],
+    "City Council Special Meeting": [r"\bcity council\b.*\bspecial\b", r"\bspecial meeting\b"],
+}
 
 DATE_FMTS = [
-    "%A, %B %d, %Y",
-    "%B %d, %Y",
-    "%b %d, %Y",
-    "%m/%d/%Y",
-    "%Y-%m-%d",
+    "%A, %B %d, %Y",   # Wednesday, October 29, 2025
+    "%B %d, %Y",       # October 29, 2025
+    "%b %d, %Y",       # Oct 29, 2025
 ]
+MONTHS_ABBR = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)"
+MONTHS_FULL = r"(January|February|March|April|May|June|July|August|September|October|November|December)"
 
-def _parse_date_time(detail_text: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Try to extract date and time from the full detail text.
-    Returns (YYYY-MM-DD or None, 'H:MM AM/PM' or 'Time TBD'/None)
-    """
-    # DATE: look for "Wednesday, October 15, 2025" or similar
-    date_iso = None
-    # first, exact long day-of-week pattern
-    m = re.search(r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+\w+\s+\d{1,2},\s+\d{4}", detail_text)
-    if m:
-        raw_date = m.group(0)
-        for fmt in DATE_FMTS:
-            try:
-                d = datetime.strptime(raw_date.strip(), fmt)
-                date_iso = d.strftime("%Y-%m-%d")
-                break
-            except Exception:
-                pass
-    # fallback: Month D, YYYY anywhere
-    if not date_iso:
-        m2 = re.search(r"\b(\w+\s+\d{1,2},\s+\d{4})\b", detail_text)
-        if m2:
-            raw_date = m2.group(1)
-            for fmt in DATE_FMTS:
-                try:
-                    d = datetime.strptime(raw_date.strip(), fmt)
-                    date_iso = d.strftime("%Y-%m-%d")
-                    break
-                except Exception:
-                    pass
-    # fallback: ISO-like
-    if not date_iso:
-        m3 = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", detail_text)
-        if m3:
-            date_iso = m3.group(1)
 
-    # TIME
-    time_local = None
-    mt = re.search(r"\b(\d{1,2})(?::(\d{2}))?\s*([AP]\.?M\.?)\b", detail_text, re.I)
-    if mt:
-        hh = int(mt.group(1))
-        mm = int(mt.group(2) or "0")
-        ampm = mt.group(3).replace(".", "").upper()
-        time_local = f"{(hh if 1 <= hh <= 12 else 7)}:{mm:02d} {ampm}"
-    else:
-        time_local = "Time TBD"
+def _classify_meeting(detail_text: str) -> Optional[str]:
+    t = " ".join(detail_text.lower().split())
+    if "city council" not in t:
+        return None
+    for mtype, pats in TYPE_PATTERNS.items():
+        if any(re.search(p, t, re.I) for p in pats):
+            return mtype
+    return None
 
-    return date_iso, time_local
 
 def _extract_pdf_from_detail(page) -> Optional[str]:
+    # Priority: explicit Agenda / Packet buttons/links
     try:
-        # prefer links with agenda/packet hints
-        for a in page.locator(".dg-portal-detail a, .dgc-meeting-detail a, .meeting-detail a, #content a, #MainContent a, body a").all():
+        a = page.locator("#document-cover-pdf").first
+        if a and a.count() > 0:
+            href = a.get_attribute("href") or ""
+            if href:
+                return href
+    except Exception:
+        pass
+
+    try:
+        for a in page.locator(
+            ".dg-portal-detail a, .dgc-meeting-detail a, .meeting-detail a, "
+            "#content a, #MainContent a, body a"
+        ).all():
             href = (a.get_attribute("href") or "").strip()
             text = (a.inner_text() or "").strip().lower()
-            if href and ".pdf" in href.lower() and ("agenda" in text or "packet" in text):
+            if not href:
+                continue
+            if ".pdf" in href.lower() and ("agenda" in text or "packet" in text):
                 return href
         # fallback: any .pdf
-        for a in page.locator(".dg-portal-detail a, .dgc-meeting-detail a, .meeting-detail a, #content a, #MainContent a, body a").all():
+        for a in page.locator(
+            ".dg-portal-detail a, .dgc-meeting-detail a, .meeting-detail a, "
+            "#content a, #MainContent a, body a"
+        ).all():
             href = (a.get_attribute("href") or "").strip()
             if href and ".pdf" in href.lower():
                 return href
@@ -115,29 +77,118 @@ def _extract_pdf_from_detail(page) -> Optional[str]:
         pass
     return None
 
+
 def _get_detail_text(page) -> str:
-    try:
-        for sel in [".dg-portal-detail", ".dgc-meeting-detail", ".meeting-detail", "#content", "#MainContent", "body"]:
+    for sel in [
+        ".dg-portal-detail",
+        ".dgc-meeting-detail",
+        ".meeting-detail",
+        "#content",
+        "#MainContent",
+        "body",
+    ]:
+        try:
             if page.locator(sel).count():
                 txt = page.locator(sel).inner_text(timeout=1000)
-                if txt and len(txt) > 50:
+                if txt and len(txt) > 40:
                     return txt
-    except Exception:
-        pass
+        except Exception:
+            continue
     try:
         return page.inner_text("body", timeout=1000)
     except Exception:
         return ""
+
+
+def _normalize_ordinal(day: str) -> str:
+    # strip 1st, 2nd, 3rd, 4th → 1,2,3,4
+    return re.sub(r"(st|nd|rd|th)$", "", day, flags=re.I)
+
+
+def _parse_date_time(detail_text: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (YYYY-MM-DD, 'H:MM AM/PM' or 'Time TBD')
+    We try several places/patterns:
+      1) Big title like "CITY COUNCIL SPECIAL MEETING - OCT 29 2025"
+      2) Body long-form "Wednesday, October 29, 2025"
+      3) Body "October 29, 2025"
+      4) Compact "Oct 29 2025" (no comma)
+      5) "When: Oct 29, 2025 6:30 PM" / "Time: 06:30 PM"
+    """
+    text = " ".join(detail_text.split())
+
+    # 1) Title bar with abbreviated month and no comma: OCT 29 2025
+    m = re.search(rf"\b{MONTHS_ABBR}\s+(\d{{1,2}})\s+(\d{{4}})\b", text, re.I)
+    if m:
+        mon, day, year = m.group(1), _normalize_ordinal(m.group(2)), m.group(3)
+        try:
+            d = datetime.strptime(f"{mon} {day}, {year}", "%b %d, %Y")
+            date_iso = d.strftime("%Y-%m-%d")
+        except Exception:
+            date_iso = None
+    else:
+        date_iso = None
+
+    # 2/3) Long/standard month, with/without weekday
+    if not date_iso:
+        for pat in [
+            rf"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+{MONTHS_FULL}\s+\d{{1,2}},\s+\d{{4}}",
+            rf"\b{MONTHS_FULL}\s+\d{{1,2}},\s+\d{{4}}\b",
+        ]:
+            m2 = re.search(pat, text, re.I)
+            if m2:
+                raw = m2.group(0).replace("Sept", "Sep")
+                raw = re.sub(r"(\d{1,2})(st|nd|rd|th),", r"\1,", raw)
+                for fmt in DATE_FMTS:
+                    try:
+                        d = datetime.strptime(raw, fmt)
+                        date_iso = d.strftime("%Y-%m-%d")
+                        break
+                    except Exception:
+                        continue
+            if date_iso:
+                break
+
+    # 4) Compact like "Oct 29 2025"
+    if not date_iso:
+        m3 = re.search(rf"\b{MONTHS_ABBR}\s+(\d{{1,2}})\s+(\d{{4}})\b", text, re.I)
+        if m3:
+            mon, day, year = m3.group(1), _normalize_ordinal(m3.group(2)), m3.group(3)
+            try:
+                d = datetime.strptime(f"{mon} {day}, {year}", "%b %d, %Y")
+                date_iso = d.strftime("%Y-%m-%d")
+            except Exception:
+                date_iso = None
+
+    # TIME
+    time_local = None
+    # Explicit label first: "Time: 06:30 PM" / "When: ... 6:30 PM"
+    mt = re.search(r"\bTime:\s*([0-2]?\d:\d{2}\s*[AP]\.?M\.?)\b", text, re.I)
+    if not mt:
+        mt = re.search(r"\bWhen:\s*.*?([0-2]?\d:\d{2}\s*[AP]\.?M\.?)\b", text, re.I)
+    if not mt:
+        mt = re.search(r"\b([0-2]?\d:\d{2}\s*[AP]\.?M\.?)\b", text, re.I)
+    if mt:
+        time_local = mt.group(1).replace(".", "").upper()
+    else:
+        time_local = "Time TBD"
+
+    return date_iso, time_local
+
 
 def parse_alamosa() -> List[Dict]:
     items: List[Dict] = []
     seen: Set[Tuple[str, str, str, str]] = set()
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-        context = browser.new_context(user_agent="MeetingWatch/Alamosa-Diligent/1.2")
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+        )
+        context = browser.new_context(user_agent="MeetingWatch/Alamosa-Diligent/1.3")
         page = context.new_page()
 
+        # 1) Load the portal page
         try:
             page.goto(PORTAL_URL, wait_until="domcontentloaded", timeout=45000)
         except PWTimeout:
@@ -145,65 +196,71 @@ def parse_alamosa() -> List[Dict]:
         except Exception as e:
             print(f"[alamosa] Error loading portal: {e}")
 
-        # Collect candidate hrefs by looking for MeetingDetail/MeetingInformation links and text mentioning City Council
+        # 2) Gather candidate detail links from visible anchors
         anchors = page.locator("a:visible").all()
-        candidate_hrefs = []
+        candidate_hrefs: List[str] = []
         for a in anchors:
             href = (a.get_attribute("href") or "").strip()
             txt = (a.inner_text() or "").strip()
             if not href:
                 continue
-            if ("MeetingDetail" in href or "MeetingInformation" in href) and ("City" in txt or "Council" in txt or "Regular" in txt):
-                candidate_hrefs.append(href)
+            # Diligent detail pages are MeetingInformation/MeetingDetail-style links
+            if "MeetingInformation" in href or "MeetingDetail" in href:
+                # Heuristic: likely a Council item
+                if re.search(r"\b(City|Council|Meeting)\b", txt, re.I):
+                    candidate_hrefs.append(href)
 
-        # Dedup
-        candidate_hrefs = list(dict.fromkeys(candidate_hrefs))
-        print(f"[alamosa] Found candidate hrefs: {len(candidate_hrefs)}")
-
-        # If none, try clicking list tiles generically
+        # If none found, click common tiles to tease out links
         if not candidate_hrefs:
-            tiles = page.locator("li, .k-listview-item, .dgc-meeting, .meeting, a").all()
-            print(f"[alamosa] No hrefs; falling back to scanning {len(tiles)} tiles")
-            # click up to first 15 tiles to look for valid details
-            for idx, t in enumerate(tiles[:15]):
+            tiles = page.locator(
+                "li, .k-listview-item, .dgc-meeting, .meeting, .item-content a, a"
+            ).all()
+            for t in tiles[:20]:
                 try:
-                    t.click(timeout=1000)
+                    t.click(timeout=800)
                     page.wait_for_timeout(400)
-                    # may have navigated; capture URL for source
-                    candidate_hrefs.append(page.url)
+                    if page.url and "MeetingInformation" in page.url:
+                        candidate_hrefs.append(page.url)
                     page.go_back(timeout=2000)
                     page.wait_for_timeout(300)
                 except Exception:
                     pass
-            candidate_hrefs = list(dict.fromkeys(candidate_hrefs))
-            print(f"[alamosa] After tile-scan, candidates: {len(candidate_hrefs)}")
 
+        # Deduplicate & normalize to absolute URLs
+        uniq: List[str] = []
+        seen_href: Set[str] = set()
+        base = PORTAL_URL.rsplit("/", 1)[0]
+        for h in candidate_hrefs:
+            if not h:
+                continue
+            if not h.startswith("http"):
+                h = base + "/" + h.lstrip("/")
+            if h not in seen_href:
+                uniq.append(h)
+                seen_href.add(h)
+
+        print(f"[alamosa] Found candidate hrefs: {len(uniq)}")
+
+        # 3) Walk each detail page and accept only Council Regular/Special, today or future
         today_mt = datetime.now(MT).date()
         accepted = 0
         visited = 0
 
-        for href in candidate_hrefs:
+        for href in uniq:
             visited += 1
-            # Navigate to detail
             try:
                 page.goto(href, wait_until="domcontentloaded", timeout=45000)
             except Exception:
-                # try to resolve relative
-                try:
-                    base = PORTAL_URL.rsplit("/", 1)[0]
-                    page.goto(base + "/" + href.lstrip("/"), wait_until="domcontentloaded", timeout=45000)
-                except Exception:
-                    print(f"[alamosa] Skip: cannot open {href}")
-                    continue
-
-            detail_text = _get_detail_text(page)
-            if not detail_text or "City Council" not in detail_text:
-                # Not a City Council page
+                print(f"[alamosa] Skip: cannot open {href}")
                 continue
 
-            # Check it's a Regular meeting
-            if not _is_regular_text(detail_text):
-                # Not Regular (could be work session/special/board)
+            detail_text = _get_detail_text(page)
+            if not detail_text:
+                continue
+
+            mtype = _classify_meeting(detail_text)
+            if mtype is None:
+                # Not a council regular/special meeting
                 continue
 
             date_iso, time_local = _parse_date_time(detail_text)
@@ -212,43 +269,47 @@ def parse_alamosa() -> List[Dict]:
                 continue
 
             try:
-                meeting_date = datetime.strptime(date_iso, "%Y-%m-%d").date()
-                if meeting_date < today_mt:
-                    # older than today
-                    continue
+                d_obj = datetime.strptime(date_iso, "%Y-%m-%d").date()
             except Exception:
                 continue
 
+            if d_obj < today_mt:
+                # past meetings excluded
+                continue
+
+            # Location (best-effort)
             location = None
-            mloc = re.search(r"(Council Chambers.*?300 Hunt Avenue.*?Alamosa.*)", detail_text, re.I)
+            mloc = re.search(
+                r"(Council Chambers.*?300 Hunt Avenue.*?Alamosa.*)|"
+                r"(300 Hunt Avenue.*Alamosa.*)",
+                detail_text,
+                re.I,
+            )
             if mloc:
-                location = mloc.group(1).strip()
-            else:
-                m2 = re.search(r"300 Hunt Avenue.*Alamosa.*", detail_text, re.I)
-                if m2:
-                    location = m2.group(0).strip()
+                location = (mloc.group(1) or mloc.group(2) or "").strip() or None
 
-            pdf_url = _extract_pdf_from_detail(page)
+            pdf_url = _extract_pdf_from_detail(page) or None
 
-            key = (date_iso, time_local or "", "City Council Regular Meeting", (pdf_url or ""))
+            key = (date_iso, time_local or "", mtype, pdf_url or "")
             if key in seen:
                 continue
             seen.add(key)
 
             agenda_summary = summarize_pdf_if_any(pdf_url)
 
-            item = make_meeting(
-                city_or_body="City of Alamosa",
-                meeting_type="City Council Regular Meeting",
-                date=date_iso,
-                start_time_local=time_local or "Time TBD",
-                status="Scheduled" if pdf_url else "Scheduled (no agenda yet)",
-                location=location,
-                agenda_url=pdf_url,
-                agenda_summary=agenda_summary,
-                source=href if href.startswith("http") else PORTAL_URL,
+            items.append(
+                make_meeting(
+                    city_or_body="City of Alamosa",
+                    meeting_type=mtype,
+                    date=date_iso,
+                    start_time_local=time_local or "Time TBD",
+                    status="Scheduled" if pdf_url else "Scheduled (no agenda yet)",
+                    location=location,
+                    agenda_url=pdf_url,
+                    agenda_summary=agenda_summary,
+                    source=href,
+                )
             )
-            items.append(item)
             accepted += 1
 
         print(f"[alamosa] Visited {visited} candidates; accepted {accepted} items")

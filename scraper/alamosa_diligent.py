@@ -1,4 +1,3 @@
-
 # scraper/alamosa_diligent.py
 from __future__ import annotations
 

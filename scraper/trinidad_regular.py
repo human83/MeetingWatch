@@ -269,6 +269,19 @@ def collect(months_ahead: int = 3) -> list[dict]:
                 out.append(asdict(m))
     return out
 
+# --- Adapter for your pipeline (ADD THIS NEAR THE BOTTOM) ---
+
+__all__ = ["parse_trinidad", "collect"]
+
+def parse_trinidad(months_ahead: int = 3):
+    """
+    Adapter for scraper.main: return a list[dict] of Trinidad meetings
+    from today forward. 'months_ahead' is kept for parity with other parsers.
+    """
+    return collect(months_ahead=months_ahead)
+
 if __name__ == "__main__":
-    data = collect(months_ahead=3)
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    import json, os
+    months = int(os.getenv("TRINIDAD_MONTHS_AHEAD", "3"))
+    print(json.dumps(parse_trinidad(months_ahead=months), indent=2, ensure_ascii=False))
+

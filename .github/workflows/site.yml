@@ -131,8 +131,18 @@ jobs:
       - name: "Sanity check: did we produce any bullets?"
         if: ${{ github.event_name != 'schedule' || steps.guard.outputs.continue == 'true' }}
         run: |
-          n=$(grep -H '"merged": [1-9][0-9]*' data/cache/agenda_summaries/*.meta.json 2>/dev/null | wc -l || true)
-          echo "Summaries with merged bullets: ${n}"
+          set -euo pipefail
+          shopt -s nullglob
+          metas=(data/cache/agenda_summaries/*.meta.json)
+          if [ ${#metas[@]} -eq 0 ]; then
+            echo "No meta files found in data/cache/agenda_summaries"
+            exit 1
+          fi
+          # Count items that either have non-empty bullets OR explicit merged>0 (future-proof)
+          n=$(jq -s '[.[] 
+            | select((.ok==true) and ( ((.merged? // 0) | tonumber) > 0 or ((.bullets // []) | length) > 0 ))
+          ] | length' "${metas[@]}")
+          echo "Summaries with bullets (or merged): ${n}"
           test "${n}" -gt 0
 
       - name: Upload data artifact (data/)

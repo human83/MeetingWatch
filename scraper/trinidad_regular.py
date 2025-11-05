@@ -23,6 +23,11 @@ from bs4 import BeautifulSoup
 from dateutil import tz
 
 log = logging.getLogger("trinidad")
+if not log.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)s [trinidad] %(message)s"))
+    log.addHandler(_h)
+log.propagate = False
 log.setLevel(logging.INFO)
 
 BASE = "https://www.trinidad.co.gov/calendar.php"

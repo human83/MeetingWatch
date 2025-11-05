@@ -1,282 +1,239 @@
-# scraper/trinidad_regular.py
-# Trinidad, CO — City Council Regular Meetings (today forward)
-# Works without PDFs by reading the event modal on the calendar page.
-
+# trinidad_regular.py
 from __future__ import annotations
+
+import os
 import re
 import json
-import logging
-from dataclasses import dataclass, asdict
-from datetime import datetime, date, time, timedelta
-from typing import Optional, List, Tuple
-from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
+import time
+from dataclasses import dataclass
+from typing import List, Optional
+from urllib.parse import urljoin, urlparse, parse_qs
 
 import requests
 from bs4 import BeautifulSoup
-from dateutil import parser as dtparse
-import pytz
+from dateutil import tz
+from dateutil.parser import parse as dtparse
+from datetime import datetime, timedelta
 
-# ---------- Config ----------
-BASE = "https://www.trinidad.co.gov"
-CAL_PATH = "/calendar.php"
-MONTH_URL = f"{BASE}{CAL_PATH}"
-MT_TZ = pytz.timezone("America/Denver")
+BASE = "https://www.trinidad.co.gov/"
+CAL_URL_TMPL = "https://www.trinidad.co.gov/calendar.php?view=month&month={month}&day=1&year={year}&calendar="
 
-TITLE_OK = re.compile(r"\bcity\s*council\b.*\bregular\b", re.I)
-TITLE_EXCLUDE = re.compile(r"\b(work\s*session|special|retreat)\b", re.I)
-
-# Matches "06:00 PM - 07:00 PM" or with en dash
-TIME_RANGE_RE = re.compile(
-    r"(\d{1,2}:\d{2}\s*[AP]M)\s*[-–]\s*(\d{1,2}:\d{2}\s*[AP]M)", re.I
+MT_TZ = tz.gettz("America/Denver")
+SESSION = requests.Session()
+SESSION.headers.update(
+    {
+        "User-Agent": "MeetingWatch (Trinidad scraper)",
+        "Accept": "text/html,application/xhtml+xml",
+    }
 )
 
-HEADERS = {
-    "User-Agent": "MeetingWatchBot/1.0 (+https://github.com/human83/MeetingWatch)"
-}
+TITLE_OK = re.compile(r"\bCity Council Regular\b", re.I)
+TITLE_EXCLUDE = re.compile(r"\bWork\s*Session\b", re.I)
 
-log = logging.getLogger("trinidad_regular")
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-
-
-# ---------- Data model ----------
 @dataclass
-class TrinidadMeeting:
-    city: str
+class Meeting:
     title: str
     start_dt: Optional[str]
     end_dt: Optional[str]
+    location: str
     date_str: str
-    location: Optional[str]
-    agenda_text: Optional[str]
+    agenda_url: Optional[str]
+    agenda_text_url: Optional[str]
+    source_url_detail_url: Optional[str]
+    agenda_text: str
     agenda_bullets: List[str]
-    source_url: str
     event_id: Optional[str]
 
+def _log(msg: str) -> None:
+    print(msg, flush=True)
 
-# ---------- Helpers ----------
-def _month_pages(start_dt: date, months_ahead: int = 3):
-    y, m = start_dt.year, start_dt.month
-    for k in range(months_ahead + 1):
-        mm = m + k
-        yk = y + (mm - 1) // 12
-        mk = (mm - 1) % 12 + 1
-        yield yk, mk
+def month_iter(today_local: datetime, months_ahead: int):
+    y = today_local.year
+    m = today_local.month
+    for i in range(months_ahead):
+        mm = ((m - 1 + i) % 12) + 1
+        yy = y + ((m - 1 + i) // 12)
+        yield yy, mm
 
+def fetch_html(url: str) -> str:
+    r = SESSION.get(url, timeout=30)
+    r.raise_for_status()
+    return r.text
 
-def _build_month_url(y: int, m: int) -> str:
-    qs = dict(view="month", month=m, day=1, year=y, calendar="")
-    return f"{MONTH_URL}?{urlencode(qs)}"
+def parse_modal_day_view(url: str) -> dict:
+    """Fetch the day view with &id=… and parse the modal content."""
+    html = fetch_html(url)
+    soup = BeautifulSoup(html, "html.parser")
 
-
-def _full(href: str) -> str:
-    return urljoin(BASE, href)
-
-
-def _parse_date_from_href(href: str) -> Optional[date]:
-    # calendar.php?view=day&month=11&day=05&year=2025&calendar=&id=845
-    try:
-        q = parse_qs(urlparse(href).query)
-        y = int((q.get("year") or ["0"])[0])
-        m = int((q.get("month") or ["0"])[0])
-        d = int((q.get("day") or ["0"])[0])
-        return date(y, m, d)
-    except Exception:
-        return None
-
-
-def _nearest_cell_date(a_tag) -> Optional[date]:
-    """Fallback: find the td with data-date around the anchor."""
-    cell = a_tag.find_parent(lambda tag: tag.name in ("td", "div") and tag.get("data-date"))
-    if cell:
-        try:
-            return dtparse.parse(cell.get("data-date")).date()
-        except Exception:
-            return None
-    return None
-
-
-def _extract_modal_bits(html: str) -> Tuple[str, str, str, Optional[str]]:
-    """
-    Returns (title, time_badge, body_text, location)
-    """
-    s = BeautifulSoup(html, "html.parser")
-    modal = s.select_one("div#event-modal, .event-modal, .modal.fade, .modal")
+    # The modal content lives in a div that becomes visible via JS.
+    # We can just grab the first .event-modal block.
+    modal = soup.find("div", attrs={"aria-label": re.compile(r"Event Modal", re.I)})
     if not modal:
-        modal = s
+        # Fallback: search by class keyword
+        modal = soup.find("div", class_=re.compile(r"event-modal|modal", re.I))
 
-    # title
-    h = modal.select_one("h1, h2, .event-title")
-    title = (h.get_text(" ", strip=True) if h else "").strip()
+    out = {"time_range": None, "title": None, "body": "", "location": ""}
 
-    # time badge
-    badge_str = ""
-    # common places for the purple time label
-    for sel in [".badge", ".time", ".event-time", ".time-badge", ".event-details-time"]:
-        el = modal.select_one(sel)
-        if el and TIME_RANGE_RE.search(el.get_text(" ", strip=True)):
-            badge_str = el.get_text(" ", strip=True)
-            break
-    if not badge_str:
-        # fallback: search anywhere in modal text
-        m = TIME_RANGE_RE.search(modal.get_text(" ", strip=True))
-        if m:
-            badge_str = m.group(0)
+    if modal:
+        # Time range is shown in a colored banner like "06:00 PM - 07:00 PM"
+        banner = modal.find(text=re.compile(r"\d{1,2}:\d{2}\s*[AP]M\s*-\s*\d{1,2}:\d{2}\s*[AP]M", re.I))
+        if banner:
+            out["time_range"] = banner.strip()
 
-    # body text
-    body_el = modal.select_one(".modal-body, .event-details, .event-content, .content")
-    body_text = (body_el.get_text("\n", strip=True) if body_el else modal.get_text("\n", strip=True))
+        # Title is a <h2> or similar
+        h = modal.find(["h2", "h3"])
+        if h:
+            out["title"] = h.get_text(strip=True)
 
-    # location (best-effort)
-    location = None
-    # look for explicit "in City Council Chambers at City Hall..." pattern
-    mloc = re.search(
-        r"in\s+(.+?),\s*Trinidad,\s*Colorado\b", body_text, re.I
-    )
-    if mloc:
-        location = mloc.group(1).strip()
-    else:
-        # look for a "Location" label
-        lab = modal.find(string=re.compile(r"Location", re.I))
-        if lab and lab.parent:
-            location = lab.parent.get_text(" ", strip=True)
+        # Body text (agenda-esque notes)
+        body_container = modal.find("div", class_=re.compile(r"modal-body|content", re.I))
+        if not body_container:
+            # the markup often places body text in the same container as title
+            body_container = modal
 
-    return title, badge_str, body_text, location
+        paragraphs = []
+        for p in body_container.find_all(["p", "li"]):
+            txt = p.get_text(" ", strip=True)
+            if txt:
+                paragraphs.append(txt)
+        out["body"] = "\n".join(paragraphs).strip()
 
-
-def _build_dt(dt_day: date, time_badge: str) -> Tuple[Optional[datetime], Optional[datetime]]:
-    m = TIME_RANGE_RE.search(time_badge or "")
-    if m:
-        try:
-            st = dtparse.parse(m.group(1)).time()
-            et = dtparse.parse(m.group(2)).time()
-            return (
-                MT_TZ.localize(datetime.combine(dt_day, st)),
-                MT_TZ.localize(datetime.combine(dt_day, et)),
-            )
-        except Exception:
-            pass
-    # fallback: 6–7 PM if site omits the badge (seen occasionally)
-    try:
-        st = time(18, 0)
-        et = time(19, 0)
-        return (
-            MT_TZ.localize(datetime.combine(dt_day, st)),
-            MT_TZ.localize(datetime.combine(dt_day, et)),
-        )
-    except Exception:
-        return None, None
-
-
-def _bulletize(text: str) -> List[str]:
-    # Loose split on numbers/dashes/bullets/newlines
-    chunks = re.split(r"(?:\n|\r|^|\u2022|•|–|-|\u2013|\u2014|\s\d+[.)])\s*", text)
-    bullets = []
-    for c in chunks:
-        c = c.strip()
-        if not c:
-            continue
-        if re.search(r"regular meeting.*will be held", c, re.I):
-            continue
-        bullets.append(re.sub(r"\s+", " ", c))
-    # de-dup
-    seen = set()
-    out = []
-    for b in bullets:
-        k = b.lower()
-        if k in seen:
-            continue
-        seen.add(k)
-        out.append(b)
-    return out[:12]
-
-
-# ---------- Collector ----------
-def collect(months_ahead: int = 3) -> List[dict]:
-    today = datetime.now(MT_TZ).date()
-    meetings: List[TrinidadMeeting] = []
-
-    with requests.Session() as s:
-        s.headers.update(HEADERS)
-        accepted = 0
-
-        for y, m in _month_pages(today, months_ahead=months_ahead):
-            month_url = _build_month_url(y, m)
-            log.info(f"[trinidad] fetching month: {month_url}")
-            r = s.get(month_url, timeout=30)
-            r.raise_for_status()
-            doc = BeautifulSoup(r.text, "html.parser")
-
-            # FullCalendar anchors used in month/list views
-            anchors = doc.select(
-                "a.fc-day-grid-event, a.fc-list-item, a.fc-h-event, .fc-content a"
-            )
-            for a in anchors:
-                # title on cell
-                title_el = a.select_one(".fc-title") or a
-                raw_title = title_el.get_text(" ", strip=True) if title_el else ""
-                if not raw_title:
-                    continue
-
-                # include regular meetings only, exclude work sessions etc
-                if not TITLE_OK.search(raw_title) or TITLE_EXCLUDE.search(raw_title):
-                    continue
-
-                href = a.get("href") or ""
-                if not href:
-                    # sometimes a clickable area is wrapped differently
-                    continue
-                href = _full(href)
-
-                # date from link (preferred) or from the cell container
-                dt_day = _parse_date_from_href(href) or _nearest_cell_date(a)
-                if not dt_day:
-                    continue
-
-                # fetch the modal by visiting the day/id URL
-                rr = s.get(href, timeout=30)
-                rr.raise_for_status()
-
-                modal_title, time_badge, body_text, location = _extract_modal_bits(rr.text)
-                start_dt, end_dt = _build_dt(dt_day, time_badge)
-                if not start_dt:
-                    continue
-
-                # future-only
-                if start_dt.date() < today:
-                    continue
-
-                # event id from href, if present
-                q = parse_qs(urlparse(href).query)
-                ev_id = (q.get("id") or [None])[0]
-
-                mtg = TrinidadMeeting(
-                    city="Trinidad, CO",
-                    title="City Council Regular Meeting",
-                    start_dt=start_dt.isoformat(),
-                    end_dt=end_dt.isoformat() if end_dt else None,
-                    date_str=start_dt.astimezone(MT_TZ).strftime("%A, %B %-d, %Y"),
-                    location=location,
-                    agenda_text=body_text,
-                    agenda_bullets=_bulletize(body_text or ""),
-                    source_url=href,
-                    event_id=ev_id,
-                )
-                meetings.append(mtg)
-                accepted += 1
-
-        log.info(f"[trinidad] accepted {accepted} City Council Regular meeting(s)")
-
-    # Final safety filter (redundant but harmless)
-    out = []
-    for m in meetings:
-        if m.start_dt:
-            d = dtparse.isoparse(m.start_dt).astimezone(MT_TZ).date()
-            if d >= today:
-                out.append(asdict(m))
+        # Location: look for an address line near title/body
+        loc = None
+        for p in body_container.find_all("p"):
+            t = p.get_text(" ", strip=True)
+            if "City Hall" in t or "Animas" in t or "Trinidad, Colorado" in t:
+                loc = t
+                break
+        out["location"] = loc or ""
     return out
 
+def parse_time_range(date_str_local: str, time_range: Optional[str]) -> (Optional[str], Optional[str], str):
+    """
+    Convert the date (YYYY-MM-DD) + time range like '06:00 PM - 07:00 PM' into
+    ISO timestamps in MT, plus a nice display date string.
+    """
+    display = ""
+    if not date_str_local:
+        return None, None, display
 
-# --- Adapter for your pipeline (kept the same) ---
+    try:
+        base = datetime.fromisoformat(date_str_local).replace(tzinfo=MT_TZ)
+    except Exception:
+        # fallback: try robust parse
+        base = dtparse(date_str_local).replace(tzinfo=MT_TZ)
+
+    display = base.strftime("%A, %B %-d, %Y")
+
+    if not time_range:
+        return None, None, display
+
+    m = re.match(r"\s*(\d{1,2}:\d{2}\s*[AP]M)\s*-\s*(\d{1,2}:\d{2}\s*[AP]M)\s*$", time_range, re.I)
+    if not m:
+        return None, None, display
+
+    start_s, end_s = m.group(1), m.group(2)
+
+    def _combine(tstr: str) -> datetime:
+        # e.g., '06:00 PM'
+        t = dtparse(tstr).time()
+        return datetime(base.year, base.month, base.day, t.hour, t.minute, tzinfo=MT_TZ)
+
+    start_dt = _combine(start_s)
+    end_dt = _combine(end_s)
+    return start_dt.isoformat(), end_dt.isoformat(), display
+
+def collect(months_ahead: int = 3) -> List[dict]:
+    """
+    Crawl present and future months, pick City Council Regular meetings,
+    follow each event's href (&id=XYZ) to pull modal details.
+    """
+    today_local = datetime.now(tz=MT_TZ).date()
+    meetings: List[dict] = []
+
+    seen_candidates = 0
+    accepted = 0
+
+    for yy, mm in month_iter(datetime.now(tz=MT_TZ), months_ahead):
+        month_url = CAL_URL_TMPL.format(month=mm, year=yy)
+        _log(f"INFO: [trinidad] fetching month: {month_url}")
+        html = fetch_html(month_url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Each event is an <a class="fc-day-grid-event …"> inside a <td data-date="YYYY-MM-DD">
+        for a in soup.select("a.fc-day-grid-event"):
+            title_node = a.select_one(".fc-title")
+            title_text = title_node.get_text(" ", strip=True) if title_node else a.get_text(" ", strip=True)
+            if not title_text:
+                continue
+            if not TITLE_OK.search(title_text) or TITLE_EXCLUDE.search(title_text):
+                continue
+
+            # Climb to the parent day cell to get the date
+            day_td = a.find_parent(["td", "div"], attrs={"data-date": True})
+            date_local = None
+            if day_td and day_td.has_attr("data-date"):
+                date_local = day_td["data-date"]  # 'YYYY-MM-DD'
+
+            href = a.get("href") or ""
+            detail_url = urljoin(BASE, href)
+
+            # Pull modal/day view to get time/location/body text
+            modal = {}
+            if detail_url and "id=" in detail_url:
+                modal = parse_modal_day_view(detail_url)
+
+            start_iso, end_iso, display_date = parse_time_range(date_local or "", modal.get("time_range"))
+
+            # Final safety: require date and today/future
+            try:
+                if date_local:
+                    d = datetime.fromisoformat(date_local).date()
+                else:
+                    d = None
+            except Exception:
+                d = None
+
+            seen_candidates += 1
+            if not d or d < today_local:
+                continue
+
+            # Build meeting entry
+            mtg = {
+                "city": "Trinidad",
+                "title": "City Council Regular Meeting",
+                "start_dt": start_iso,
+                "end_dt": end_iso,
+                "date_str": display_date or (d.strftime("%A, %B %-d, %Y") if d else ""),
+                "location": (modal.get("location") or "City Council Chambers at City Hall, Trinidad, CO").strip(),
+                "agenda_url": None,                # no PDF posted in advance
+                "agenda_text_url": detail_url,     # we’ll treat the day view as the text source
+                "body_text": modal.get("body", "").strip(),
+                "agenda_bullets": [],              # summarizer will fill if body_text exists
+                "source_url_detail_url": detail_url,
+                "event_id": parse_qs(urlparse(detail_url).query).get("id", [None])[0],
+            }
+            meetings.append(mtg)
+            accepted += 1
+
+    _log(f"INFO: [trinidad] candidates seen: {seen_candidates}; accepted {accepted} City Council Regular meeting(s)")
+    # Final safety: only keep items today forward (defensive if parsing missed)
+    out = []
+    for m in meetings:
+        try:
+            if m["start_dt"]:
+                d = dtparse(m["start_dt"]).astimezone(MT_TZ).date()
+            else:
+                # fall back to date_str if start time is unknown
+                d = dtparse(m["date_str"]).date()
+        except Exception:
+            d = None
+        if d and d >= today_local:
+            out.append(m)
+    return out
+
+# --- Adapter for your pipeline (ADD THIS NEAR THE BOTTOM) ---
+
 __all__ = ["parse_trinidad", "collect"]
 
 def parse_trinidad(months_ahead: int = 3):
@@ -286,8 +243,7 @@ def parse_trinidad(months_ahead: int = 3):
     """
     return collect(months_ahead=months_ahead)
 
-
 if __name__ == "__main__":
-    import os
+    import os, json
     months = int(os.getenv("TRINIDAD_MONTHS_AHEAD", "3"))
     print(json.dumps(parse_trinidad(months_ahead=months), indent=2, ensure_ascii=False))

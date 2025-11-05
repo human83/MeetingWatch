@@ -1,205 +1,218 @@
-# scraper/trinidad_regular.py
+# -*- coding: utf-8 -*-
+"""
+Trinidad, CO — City Council Regular Meeting scraper
+Scrapes the server-rendered "list" calendar pages and follows each event's
+day-view URL (which contains the modal HTML with title/time/description).
+Only returns City Council Regular Meetings, today-forward.
+
+Adapter exports:
+  - parse_trinidad(months_ahead: int = 3) -> list[dict]
+  - collect(months_ahead: int = 3) -> list[dict]
+"""
+
 from __future__ import annotations
+import os
 import re
 import json
-import time
-from datetime import datetime, timedelta, date
-from urllib.parse import urljoin
+import logging
+from datetime import date, datetime, timedelta
+from urllib.parse import urljoin, urlparse, parse_qs
 
+import requests
+from bs4 import BeautifulSoup
 from dateutil import tz
-from dateutil.parser import isoparse as _isoparse
 
-from playwright.sync_api import sync_playwright
+log = logging.getLogger("trinidad")
+log.setLevel(logging.INFO)
 
+BASE = "https://www.trinidad.co.gov/calendar.php"
 MT_TZ = tz.gettz("America/Denver")
-BASE = "https://www.trinidad.co.gov"
 
-MONTH_URL = (
-    "https://www.trinidad.co.gov/calendar.php"
-    "?view=month&month={m}&day=1&year={y}&calendar="
-)
+# --- Helpers ---------------------------------------------------------------
 
-def _yyyy_mm_dd_today_mt() -> date:
-    return datetime.now(tz=MT_TZ).date()
+SESSION = requests.Session()
+SESSION.headers.update({
+    "User-Agent": "MeetingWatchBot/1.0 (+https://github.com/human83/MeetingWatch)"
+})
 
-def _mk_months(start: date, months_ahead: int):
-    y = start.year
-    m = start.month
-    for k in range(months_ahead):
-        mm = ((m - 1 + k) % 12) + 1
-        yy = y + ((m - 1 + k) // 12)
-        yield yy, mm
+TIME_RANGE_RE = re.compile(r"(\d{1,2}:\d{2}\s*[AP]M)\s*[-–]\s*(\d{1,2}:\d{2}\s*[AP]M)", re.I)
 
-def _clean(txt: str) -> str:
-    return re.sub(r"\s+", " ", (txt or "")).strip()
+def _clean_text(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "")).strip()
 
-def _parse_fc_time(tstr: str) -> tuple[int, int]:
-    """
-    Accepts '6p', '6:00p', '06:00 PM', etc. Returns (hour, minute) 24h.
-    """
-    s = (tstr or "").strip().lower()
-    if not s:
-        return (0, 0)
+def _month_iter(start: date, months_ahead: int):
+    y, m = start.year, start.month
+    for _ in range(months_ahead):
+        yield y, m
+        # advance 1 month
+        if m == 12:
+            y, m = y + 1, 1
+        else:
+            m += 1
 
-    # normalize like '6p' -> '6 pm'
-    s = s.replace("a.m.", "am").replace("p.m.", "pm")
-    s = re.sub(r"([0-9])\s*([ap])\b", r"\1 \2m", s)  # 6p -> 6 pm
-    # pull hour:min and am/pm
-    m = re.search(r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)?", s)
+def _is_regular_meeting(text: str) -> bool:
+    return "city council regular meeting".lower() in (text or "").lower()
+
+def _fetch(url: str, **params) -> BeautifulSoup:
+    r = SESSION.get(url, params=params, timeout=30)
+    r.raise_for_status()
+    return BeautifulSoup(r.text, "html.parser")
+
+def _parse_time_range(text: str) -> tuple[str | None, str | None]:
+    m = TIME_RANGE_RE.search(text or "")
     if not m:
-        return (0, 0)
-    hh = int(m.group(1))
-    mm = int(m.group(2) or 0)
-    ampm = (m.group(3) or "").lower()
-    if ampm == "pm" and hh != 12:
-        hh += 12
-    if ampm == "am" and hh == 12:
-        hh = 0
-    return (hh, mm)
+        return None, None
+    return m.group(1), m.group(2)
 
-def _as_iso_mt(d: date, hh: int, mm: int) -> str:
-    dt = datetime(d.year, d.month, d.day, hh, mm, tzinfo=MT_TZ)
-    return dt.isoformat()
-
-def _accept_title(title: str) -> bool:
-    t = (title or "").lower()
-    if "city council" not in t:
-        return False
-    if "regular" not in t:
-        return False
-    if "work session" in t:
-        return False
-    return True
-
-def _grab_modal(page) -> str:
-    """
-    The page is already on ?…&id=#### which auto-opens the modal.
-    Wait and pull visible modal text.
-    """
-    page.wait_for_selector("#event-modal", state="attached", timeout=8000)
-    # Give the site a beat to render rich text
+def _parse_hhmm_ampm_to_24h(d: date, tstr: str) -> datetime | None:
     try:
-        page.wait_for_selector('#event-modal[aria-hidden="false"], #event-modal.show', timeout=3000)
+        dt = datetime.strptime(f"{d.isoformat()} {tstr.upper()}", "%Y-%m-%d %I:%M %p")
+        return dt.replace(tzinfo=MT_TZ)
     except Exception:
-        pass
-    body = ""
-    try:
-        body = page.locator("#event-modal").inner_text()
-    except Exception:
-        pass
-    return _clean(body)
+        return None
 
-def _extract_location_from_modal(text: str) -> str:
-    # Very light heuristic; keeps it stable if they change prose slightly
-    # Example in screenshot:
-    # "in City Council Chambers at City Hall, 135 N. Animas Street, Trinidad, Colorado, 81082"
-    m = re.search(r"in\s+(.+?)(?:\n|$)", text, re.I)
-    return _clean(m.group(1)) if m else ""
+def _extract_day_params(href: str) -> tuple[int, int, int]:
+    """
+    href looks like: calendar.php?view=day&month=11&day=05&year=2025&calendar=&id=845
+    """
+    q = parse_qs(urlparse(href).query)
+    year = int(q.get("year", ["1970"])[0])
+    month = int(q.get("month", ["1"])[0])
+    day = int(q.get("day", ["1"])[0])
+    return year, month, day
 
-def collect(months_ahead: int = 3):
-    out = []
-    today = _yyyy_mm_dd_today_mt()
+# --- Core scraping ---------------------------------------------------------
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(headless=True)
-        context = browser.new_context()
-        page = context.new_page()
+def _gather_candidates(months_ahead: int = 3) -> list[str]:
+    """
+    Returns day-view URLs (&id=...) for City Council Regular Meeting items
+    discovered from the list view.
+    """
+    today = datetime.now(MT_TZ).date()
+    out: list[str] = []
 
-        # Visit month pages and gather candidate events from grid
-        for yy, mm in _mk_months(today.replace(day=1), months_ahead):
-            url = MONTH_URL.format(m=mm, y=yy)
-            print(f"INFO: [trinidad] fetching month: {url}")
-            page.goto(url, wait_until="domcontentloaded")
+    for y, m in _month_iter(today.replace(day=1), months_ahead):
+        list_params = dict(view="list", month=m, day=1, year=y, calendar="")
+        log.info("[trinidad] fetching month: %s?view=list&month=%s&day=1&year=%s&calendar=",
+                 BASE, m, y)
+        soup = _fetch(BASE, **list_params)
 
-            # The events in month view are anchors:
-            # <a class="fc-day-grid-event ..."><div class="fc-content"><span class="fc-time">6p</span><span class="fc-title">City Council Regular Meeting</span></div></a>
-            events = page.locator("a.fc-day-grid-event")
-            n = events.count()
+        # list view has <a href="calendar.php?view=day&...&id=###">Title...</a>
+        links = soup.select('a[href*="calendar.php?view=day"][href*="&id="]')
+        for a in links:
+            title = _clean_text(a.get_text(" ").strip())
+            href = a.get("href") or ""
+            if not href:
+                continue
+            if not _is_regular_meeting(title):
+                continue
 
-            for i in range(n):
-                el = events.nth(i)
-                title = _clean(el.locator(".fc-title").inner_text())
-                if not _accept_title(title):
-                    continue
+            # Filter to today-forward using the date embedded in the href
+            yy, mm, dd = _extract_day_params(href)
+            d = date(yy, mm, dd)
+            if d < today:
+                continue
 
-                # date from the day-cell
-                try:
-                    d_attr = el.evaluate('el.closest("td[data-date]")?.getAttribute("data-date")')
-                except Exception:
-                    d_attr = None
-                try:
-                    d_val = datetime.strptime(d_attr, "%Y-%m-%d").date() if d_attr else None
-                except Exception:
-                    d_val = None
+            out.append(urljoin(BASE, href))
 
-                # time from the mini label
-                time_str = _clean(el.locator(".fc-time").inner_text())
-                hh, mm_ = _parse_fc_time(time_str)
+    return out
 
-                # detail / modal
-                href = el.get_attribute("href") or ""
-                detail_url = urljoin(BASE, href)
+def _extract_event(day_url: str) -> dict | None:
+    """
+    Parse the day view (with &id=...) to pull title, time range, body text.
+    """
+    soup = _fetch(day_url)
 
-                agenda_text = ""
-                location = ""
-                if "&id=" in detail_url:
-                    # open on a separate tab to not lose month listing
-                    p2 = context.new_page()
-                    p2.goto(detail_url, wait_until="domcontentloaded")
-                    agenda_text = _grab_modal(p2)
-                    if not location:
-                        location = _extract_location_from_modal(agenda_text)
-                    p2.close()
+    # Title e.g., <h2 id="modal-event-title">City Council Regular Meeting</h2>
+    title_tag = soup.select_one("#modal-event-title")
+    title = _clean_text(title_tag.get_text()) if title_tag else ""
 
-                # build record (guard: must have a date)
-                if d_val:
-                    start_iso = _as_iso_mt(d_val, hh, mm_)
-                    date_str = (
-                        datetime.fromisoformat(start_iso)
-                        .astimezone(MT_TZ)
-                        .strftime("%A, %B %-d, %Y")
-                    )
-                    mtg = {
-                        "city": "Trinidad",
-                        "source": "Trinidad, CO",
-                        "title": "City Council Regular Meeting",
-                        "start_dt": start_iso,
-                        "end_dt": None,  # modal shows 6:00–7:00 PM sometimes; we can add later if desired
-                        "date_str": date_str,
-                        "location": location,
-                        "agenda_text": agenda_text,
-                        "agenda_bullets": [],  # summarizer will handle bullets if agenda_text present
-                        "source_url_detail_url": detail_url,
-                        "event_id__": re.search(r"[?&]id=(\d+)", detail_url).group(1) if "&id=" in detail_url else "",
-                    }
-                    out.append(mtg)
+    # Time ribbon area: e.g., "06:00 PM - 07:00 PM"
+    header = soup.select_one(".modal-event-header") or soup.select_one(".modal-body")
+    header_text = _clean_text(header.get_text(" ")) if header else ""
+    start_s, end_s = _parse_time_range(header_text)
 
-        context.close()
-        browser.close()
+    # Agenda / description body
+    desc = soup.select_one("#modal-event-description") or soup.select_one(".modal-event-body")
+    agenda_text = _clean_text(desc.get_text("\n")) if desc else ""
 
-    # final safety: only from today forward
-    final = []
-    for m in out:
+    # Location (best-effort) — sometimes embedded in the body lines
+    loc = ""
+    for line in (agenda_text or "").splitlines():
+        l = line.strip()
+        if not l:
+            continue
+        if "Chambers" in l or "City Hall" in l or "Animas" in l or "Street" in l:
+            loc = l
+            break
+
+    # Date comes from URL params (most reliable)
+    yy, mm, dd = _extract_day_params(day_url)
+    event_date = date(yy, mm, dd)
+
+    # Build start_dt if possible
+    start_dt = None
+    if start_s:
+        start_dt = _parse_hhmm_ampm_to_24h(event_date, start_s)
+    if start_dt is None:
+        # Fallback 6:00 PM local if time not parsed (calendar often uses 6–7 PM)
+        start_dt = datetime(event_date.year, event_date.month, event_date.day, 18, 0, tzinfo=MT_TZ)
+
+    # Build result
+    ev_id = parse_qs(urlparse(day_url).query).get("id", [""])[0]
+    result = {
+        "city": "Trinidad",
+        "title": "City Council Regular Meeting",
+        "start_dt": start_dt.isoformat(),
+        "end_dt": None,  # can be added if we want to parse end_s
+        "date_str": start_dt.astimezone(MT_TZ).strftime("%A, %B %-d, %Y"),
+        "location": loc or "City Council Chambers, City Hall (Trinidad, CO)",
+        "agenda_text": agenda_text,
+        "agenda_bullets": [],  # summarize step will fill if/when we ever get PDFs/text
+        "source_url_detail_url": day_url,
+        "event_id": ev_id,
+    }
+    return result
+
+def collect(months_ahead: int = 3) -> list[dict]:
+    candidates = _gather_candidates(months_ahead=months_ahead)
+    log.info("[trinidad] candidates seen: %d", len(candidates))
+
+    meetings: list[dict] = []
+    for url in candidates:
+        try:
+            mtg = _extract_event(url)
+            if mtg:
+                meetings.append(mtg)
+        except Exception as e:
+            log.warning("[trinidad] failed to parse %s: %r", url, e)
+
+    # Final safety filter: today-forward
+    out: list[dict] = []
+    today = datetime.now(MT_TZ).date()
+    for m in meetings:
         try:
             d = datetime.fromisoformat(m["start_dt"]).astimezone(MT_TZ).date()
+            if d >= today:
+                out.append(m)
         except Exception:
             continue
-        if d >= today:
-            final.append(m)
-    print(f"INFO: [trinidad] candidates seen: {len(out)}; accepted {len(final)} City Council Regular meeting(s)")
-    return final
 
-# --- Adapter for your pipeline (keep this near the bottom) ---
+    log.info("[trinidad] accepted %d City Council Regular meeting(s)", len(out))
+    return out
+
+# --- Adapter for your pipeline --------------------------------------------
+
 __all__ = ["parse_trinidad", "collect"]
 
-def parse_trinidad(months_ahead: int = 3):
+def parse_trinidad(months_ahead: int = 3) -> list[dict]:
     """
     Adapter for scraper.main: return a list[dict] of Trinidad meetings
-    from today forward. 'months_ahead' is kept for parity with other parsers.
+    from today forward. `months_ahead` is kept for parity with other parsers.
     """
     return collect(months_ahead=months_ahead)
 
 if __name__ == "__main__":
-    import os
+    import sys
     months = int(os.getenv("TRINIDAD_MONTHS_AHEAD", "3"))
     print(json.dumps(parse_trinidad(months_ahead=months), indent=2, ensure_ascii=False))

@@ -30,6 +30,7 @@ if not log.handlers:
 log.propagate = False
 log.setLevel(logging.INFO)
 
+CAL_ID = os.getenv("TRINIDAD_CALENDAR_ID", "845")
 BASE = "https://www.trinidad.co.gov/calendar.php"
 MT_TZ = tz.gettz("America/Denver")
 
@@ -97,9 +98,9 @@ def _gather_candidates(months_ahead: int = 3) -> list[str]:
     out: list[str] = []
 
     for y, m in _month_iter(today.replace(day=1), months_ahead):
-        list_params = dict(view="list", month=m, day=1, year=y, calendar="")
-        log.info("[trinidad] fetching month: %s?view=list&month=%s&day=1&year=%s&calendar=",
-                 BASE, m, y)
+        list_params = dict(view="list", month=m, day=1, year=y, calendar=CAL_ID)
+        log.info("[trinidad] fetching month: %s?view=list&month=%s&day=1&year=%s&calendar=%s",
+                 BASE, m, y, CAL_ID)
         soup = _fetch(BASE, **list_params)
 
         # list view has <a href="calendar.php?view=day&...&id=###">Title...</a>

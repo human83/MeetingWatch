@@ -104,7 +104,17 @@ def _gather_candidates(months_ahead: int = 3) -> list[str]:
         soup = _fetch(BASE, **list_params)
 
         # list view has <a href="calendar.php?view=day&...&id=###">Title...</a>
-        links = soup.select('a[href*="calendar.php?view=day"][href*="&id="]')
+        links = soup.select('a[href*="view=day"][href*="id="]')
+        if not links:
+            month_params = dict(view="month", month=m, day=1, year=y, calendar=CAL_ID)
+            mdoc = _fetch(BASE, **month_params)
+            for a in mdoc.select("a.fc-day-grid-event"):
+                title = _clean_text(a.get_text(" "))
+                if not _is_regular_meeting(title):
+                    continue
+                href = a.get("href") or ""
+                if href and "view=day" in href and "id=" in href:
+                    links.append(a)
         for a in links:
             title = _clean_text(a.get_text(" ").strip())
             href = a.get("href") or ""

@@ -172,84 +172,209 @@ jobs:
           cp -r data _site/
 
       - name: Generate index.html from data/meetings.json
-        run: |
-          python - <<'PY'
-          import json, pathlib, html
-          from datetime import datetime
+      run: |
+        python - <<'PY'
+        import json, html
+        from pathlib import Path
 
-          data_path = pathlib.Path('data/meetings.json')
-          out_dir   = pathlib.Path('_site')
-          out_dir.mkdir(parents=True, exist_ok=True)
+        data_path = Path("data/meetings.json")
+        out_dir   = Path("_site")
+        (out_dir/"data").mkdir(parents=True, exist_ok=True)
 
-          try:
-              raw = json.loads(data_path.read_text(encoding='utf-8'))
-          except FileNotFoundError:
-              (out_dir/'index.html').write_text(
-                  "<h1>MeetingWatch</h1><p>No meetings.json found.</p>",
-                  encoding='utf-8'
-              )
-              raise
+        # Copy meetings.json into the public _site/data folder
+        out_data_path = out_dir / "data" / "meetings.json"
+        out_data_path.write_text(data_path.read_text(encoding="utf-8"), encoding="utf-8")
 
-          # meetings could be a list or wrapped under a key like 'meetings'
-          if isinstance(raw, list):
-              meetings = raw
-          else:
-              meetings = raw.get('meetings') or next(
-                  (v for v in raw.values() if isinstance(v, list)), []
-              )
+        # Load meetings for the static (no-JS) fallback
+        try:
+            raw = json.loads(data_path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            (out_dir/'index.html').write_text(
+                "<h1>MeetingWatch</h1><p>No meetings.json found.</p>", encoding='utf-8'
+            )
+            raise
 
-          def sort_key(m):
-              d = (m.get('date') or '')
-              t = m.get('start_time_local') or m.get('start_time') or ''
-              return (d, t)
+        # meetings may be a list or wrapped (e.g., {"meetings":[...]})
+        if isinstance(raw, list):
+            meetings = raw
+        else:
+            meetings = raw.get('meetings') or next((v for v in raw.values() if isinstance(v, list)), [])
 
-          meetings = sorted(meetings, key=sort_key)
+        def sort_key(m):
+            d = (m.get('date') or '')
+            t = m.get('start_time_local') or m.get('start_time') or m.get('time') or ''
+            return (d, t)
 
-          # Build HTML
-          parts = []
-          parts.append('<!doctype html><meta charset="utf-8"><title>MeetingWatch</title>')
-          parts.append('''<style>
-              body{font:16px system-ui,Segoe UI,Helvetica,Arial;max-width:900px;margin:2rem auto;padding:0 1rem;}
-              h1{margin:0 0 1rem;}
-              .m{border:1px solid #e3e3e3;border-radius:12px;padding:12px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04);}
-              .meta{color:#555;font-size:.95rem}
-              ul{margin:.5rem 0 0 1.3rem}
-              a{color:#0b62d6;text-decoration:none}
-              a:hover{text-decoration:underline}
-          </style>''')
-          parts.append('<h1>MeetingWatch</h1>')
-          parts.append('<p><a href="data/meetings.json">Download meetings.json</a></p>')
+        meetings = sorted(meetings, key=sort_key)
 
-          for m in meetings:
-              title = html.escape(m.get('title') or m.get('name') or 'Meeting')
-              date  = html.escape(m.get('date') or '')
-              time  = html.escape(m.get('start_time_local') or m.get('start_time') or '')
-              loc   = html.escape(m.get('location') or '')
-              agenda_url = m.get('agenda_url') or m.get('agenda_pdf') or ''
-              agenda_link = f' &middot; <a href="{html.escape(agenda_url)}">agenda</a>' if agenda_url else ''
-              source_url = m.get('source') or ''
-              source_link = f' &middot; <a href="{html.escape(source_url)}">{html.escape(source_url)}</a>' if source_url else ''
+        # ---------- HTML skeleton ----------
+        parts = []
+        parts.append('<!doctype html><meta charset="utf-8"><title>MeetingWatch</title>')
+        parts.append('''<style>
+          body{font:16px system-ui,Segoe UI,Helvetica,Arial;max-width:900px;margin:2rem auto;padding:0 1rem;}
+          h1{margin:0 0 1rem;}
+          .m{border:1px solid #e3e3e3;border-radius:12px;padding:12px;margin:12px 0;box-shadow:0 1px 2px rgba(0,0,0,.04);}
+          .meta{color:#555;font-size:.95rem}
+          ul{margin:.5rem 0 0 1.3rem}
+          a{color:#0b62d6;text-decoration:none}
+          a:hover{text-decoration:underline}
+          #controls{display:grid;gap:.5rem;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));margin:1rem 0;}
+          #controls label select{width:100%;padding:.4rem;border-radius:.5rem;border:1px solid #e5e7eb}
+          #results{list-style:none;padding:0;display:grid;gap:.75rem;}
+        </style>''')
 
-              # bullets can be str or list
-              bullets = m.get('agenda_summary') or []
-              if isinstance(bullets, str):
-                  bullets = [bullets]
-              bullets = [html.escape(str(b)) for b in bullets]
+        parts.append('<h1>MeetingWatch</h1>')
+        parts.append('<p><a href="data/meetings.json">Download meetings.json</a></p>')
 
-              parts.append('<div class="m">')
-              parts.append(f'<div class="meta"><strong>{date}</strong> {time}{agenda_link}{source_link}</div>')
-              parts.append(f'<h3 style="margin:.35rem 0 .4rem">{title}</h3>')
-              if loc:
-                  parts.append(f'<div class="meta">{loc}</div>')
-              if bullets:
-                  parts.append('<ul>')
-                  for b in bullets:
-                      parts.append(f'<li>{b}</li>')
-                  parts.append('</ul>')
-              parts.append('</div>')
+        # Controls + dynamic target
+        parts.append('''
+          <section id="controls">
+            <label><div style="font-weight:600;">City</div>
+              <select id="citySelect"><option value="">All cities</option></select>
+            </label>
+            <label><div style="font-weight:600;">Source</div>
+              <select id="sourceSelect"><option value="">All sources</option></select>
+            </label>
+          </section>
+          <ul id="results"></ul>
+        ''')
 
-          (out_dir/'index.html').write_text('\n'.join(parts), encoding='utf-8')
-          PY
+        # ---------- Static fallback (kept for no-JS) ----------
+        parts.append('<noscript><p><em>JavaScript disabled — showing unfiltered list.</em></p></noscript>')
+        parts.append('<div id="static-list">')
+
+        for m in meetings:
+            title = html.escape(m.get('title') or m.get('name') or 'Meeting')
+            date  = html.escape(m.get('date') or '')
+            # keep your previous time fallbacks
+            time  = html.escape(m.get('start_time_local') or m.get('start_time') or m.get('time') or '')
+            loc   = html.escape(m.get('location') or '')
+            agenda_url = m.get('agenda_url') or m.get('agenda_pdf') or ''
+            agenda_link = f' &middot; <a href="{html.escape(agenda_url)}">agenda</a>' if agenda_url else ''
+            source_url = m.get('source') or ''
+            source_link = f' &middot; <a href="{html.escape(source_url)}">{html.escape(source_url)}</a>' if source_url else ''
+
+            bullets = m.get('agenda_summary') or []
+            if isinstance(bullets, str):
+                bullets = [bullets]
+            bullets = [html.escape(str(b)) for b in bullets]
+
+            parts.append('<div class="m">')
+            parts.append(f'<div class="meta"><strong>{date}</strong> {time}{agenda_link}{source_link}</div>')
+            parts.append(f'<h3 style="margin:.35rem 0 .4rem">{title}</h3>')
+            if loc:
+                parts.append(f'<div class="meta">{loc}</div>')
+            if bullets:
+                parts.append('<ul>')
+                for b in bullets:
+                    parts.append(f'<li>{b}</li>')
+                parts.append('</ul>')
+            parts.append('</div>')
+
+        parts.append('</div>')  # /#static-list
+
+        # ---------- Client-side filters + uniform card header ----------
+        parts.append('''<script>
+        (async function(){
+          const res = await fetch('data/meetings.json', {cache:'no-store'});
+          const raw = await res.json();
+          const items = Array.isArray(raw) ? raw : (raw.meetings || []);
+
+          const citySel = document.getElementById('citySelect');
+          const srcSel  = document.getElementById('sourceSelect');
+          const results = document.getElementById('results');
+          const staticList = document.getElementById('static-list');
+
+          const cities  = [...new Set(items.map(x => (x.city||'').trim()).filter(Boolean))].sort();
+          const sources = [...new Set(items.map(x => (x.provider||'').trim()).filter(Boolean))].sort();
+          for (const c of cities)  citySel.append(new Option(c, c));
+          for (const s of sources) srcSel.append(new Option(s, s));
+
+          // Restore from URL/localStorage
+          const url = new URL(location.href);
+          citySel.value = url.searchParams.get('city') ?? localStorage.getItem('mw_city') ?? '';
+          srcSel.value  = url.searchParams.get('source') ?? localStorage.getItem('mw_source') ?? '';
+
+          function inferType(title=''){
+            const t = String(title).toLowerCase();
+            if (t.includes('work'))   return 'Work Session';
+            if (t.includes('special'))return 'Special Meeting';
+            if (t.includes('regular'))return 'City Council Regular Meeting';
+            if (t.includes('council'))return 'City Council Meeting';
+            return 'Meeting';
+          }
+          function formatWhen(m){
+            const d = m.date || '';
+            const t = m.start_time_local || m.start_time || m.time || '';
+            const tz = m.tz ? (' ' + String(m.tz).replace('America/','')) : '';
+            if (d && t) return d + ' • ' + t + tz;
+            if (d) return d;
+            if (t) return t + tz;
+            return '';
+          }
+          function headerLine(m){
+            const city = m.city ? '🏙️ ' + m.city : '';
+            const agenda = (m.agenda_url || m.agenda_pdf) ? '<a href="'+(m.agenda_url||m.agenda_pdf)+'" target="_blank" rel="noopener">📝 Agenda</a>' : '';
+            const source = m.source ? '<a href="'+m.source+'" target="_blank" rel="noopener">🌐 Source</a>' : '';
+            const type = '📌 ' + (m.meeting_type || inferType(m.title||''));
+            const when = (function(w){ return w ? '🕒 ' + w : ''; })(formatWhen(m));
+            return [city, agenda, source, type, when].filter(Boolean).join('  •  ');
+          }
+          function bulletsHTML(m){
+            const arr = Array.isArray(m.agenda_summary) ? m.agenda_summary
+                       : (typeof m.agenda_summary === 'string' ? m.agenda_summary.split(/\\n+/).filter(Boolean) : []);
+            if (!arr.length) return '';
+            return '<ul>' + arr.map(b => '<li>'+b+'</li>').join('') + '</ul>';
+          }
+          function syncState(){
+            const c = citySel.value, s = srcSel.value;
+            localStorage.setItem('mw_city', c);
+            localStorage.setItem('mw_source', s);
+            const u = new URL(location.href);
+            c ? u.searchParams.set('city', c) : u.searchParams.delete('city');
+            s ? u.searchParams.set('source', s) : u.searchParams.delete('source');
+            history.replaceState({}, '', u);
+          }
+          function render(){
+            syncState();
+            const c = citySel.value, s = srcSel.value;
+            const filtered = items.filter(m =>
+              (!c || (m.city||'') === c) && (!s || (m.provider||'') === s)
+            );
+            results.innerHTML = '';
+            if (!filtered.length){
+              results.innerHTML = '<li style="opacity:.75;">No results match your filters.</li>';
+              staticList.style.display = '';
+              return;
+            }
+            // Hide the static fallback once we have dynamic content
+            staticList.style.display = 'none';
+
+            for (const m of filtered){
+              const href = m.url || m.source || m.agenda_url || '#';
+              const li = document.createElement('li');
+              li.className = 'm';
+              li.innerHTML = `
+                <div style="font-weight:700;margin-bottom:.25rem;">
+                  <a href="${href}" target="_blank" rel="noopener">${(m.title||'Meeting')}</a>
+                </div>
+                <div class="meta" style="margin-bottom:.4rem;display:flex;flex-wrap:wrap;gap:.5rem .75rem;">
+                  ${headerLine(m)}
+                </div>
+                ${bulletsHTML(m)}
+              `;
+              results.appendChild(li);
+            }
+          }
+          citySel.addEventListener('change', render);
+          srcSel.addEventListener('change', render);
+          render();
+        })();
+        </script>''')
+
+        (out_dir/'index.html').write_text('\n'.join(parts), encoding='utf-8')
+        PY
+
 
       - name: List built site (debug)
         run: |

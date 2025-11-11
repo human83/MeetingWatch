@@ -285,10 +285,40 @@ jobs:
             const results = document.getElementById('results');
             const staticList = document.getElementById('static-list');
           
-            const cities  = [...new Set(items.map(x => (x.city||'').trim()).filter(Boolean))].sort();
+            // --- Always show these cities, even if they have (0) meetings right now ---
+            const KNOWN_CITIES = [
+              "Alamosa",
+              "Colorado Springs",
+              "Salida",
+              "Pueblo",
+              "El Paso County",
+              "Trinidad"
+            ];
+            
+            // Counts from current data (for badges)
+            const cityCounts = items.reduce((acc, x) => {
+              const c = (x.city || '').trim();
+              if (!c) return acc;
+              acc[c] = (acc[c] || 0) + 1;
+              return acc;
+            }, {});
+            
+            // Merge catalog ∪ data, then sort alphabetically
+            const cities = Array.from(new Set([
+              ...KNOWN_CITIES,
+              ...Object.keys(cityCounts)
+            ])).sort();
+            
+            // Build options with counts; keep selectable even if 0
+            for (const c of cities) {
+              const count = cityCounts[c] || 0;
+              citySel.append(new Option(`${c} (${count})`, c));
+            }
+            
+            // Sources unchanged (built from data only)
             const sources = [...new Set(items.map(x => (x.provider||'').trim()).filter(Boolean))].sort();
-            for (const c of cities)  citySel.append(new Option(c, c));
             for (const s of sources) srcSel.append(new Option(s, s));
+
           
             // Restore from URL/localStorage
             const url = new URL(location.href);

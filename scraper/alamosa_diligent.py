@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, date, timedelta
+from zoneinfo import ZoneInfo
 import re
-from datetime import datetime, date
 from typing import List, Dict, Optional
 
 from bs4 import BeautifulSoup
@@ -12,14 +13,16 @@ from playwright.sync_api import sync_playwright
 PORTAL_URL = "https://cityofalamosa.diligent.community/Portal/MeetingInformation.aspx?Org=Cal&Id=115"
 ALAMOSA_TZ = "America/Denver"
 
+def _today_denver():
+    return datetime.now(ZoneInfo(ALAMOSA_TZ)).date()
+
 # Header text on the detail pane looks like:
 #   "CITY COUNCIL SPECIAL MEETING - OCT 29 2025"
 WANTED_TYPES = ("CITY COUNCIL REGULAR MEETING", "CITY COUNCIL SPECIAL MEETING")
 
 
 def _today_denver_str() -> str:
-    # Runner-friendly date fence for "today or future" (day-level only).
-    return date.today().isoformat()
+    return _today_denver().isoformat()
 
 
 def _norm_space(s: str) -> str:
@@ -49,14 +52,21 @@ def _parse_main_detail(html: str) -> Optional[Dict]:
     if not mtg_type:
         return None  # not City Council Regular/Special
 
-    # Date appears after the hyphen, e.g. "- OCT 29 2025"
-    m = re.search(r"-\s+([A-Z]{3}\s+\d{1,2}\s+\d{4})$", header)
-    date_iso = None
-    if m:
-        try:
-            date_iso = datetime.strptime(m.group(1), "%b %d %Y").date().isoformat()
-        except Exception:
-            pass
+    # Date appears after the hyphen, e.g., "- Oct 29 2025"
+    m = re.search(r"-\s+([A-Za-z]{3}\s+\d{1,2}\s+\d{4})\s*$", header, re.I)
+    if not m:
+        return None  # couldn't read a date → skip
+
+    try:
+        date_obj = datetime.strptime(m.group(1), "%b %d %Y").date()
+    except ValueError:
+        return None  # bad date → skip
+
+    # Hard guard: today & future only (Denver)
+    if date_obj < _today_denver():
+        return None
+
+    date_iso = date_obj.isoformat()
 
     # Time and Location blocks
     time_text = None
@@ -110,21 +120,21 @@ def _parse_upcoming_sidebar(html: str) -> List[Dict]:
         text = _norm_space(li.get_text(" ", strip=True))
         up = text.upper()
         if "CITY COUNCIL" in up and ("REGULAR" in up or "SPECIAL" in up):
-            # Expect tail like " - Nov 05 2025"
-            m = re.search(r"-\s+([A-Z][a-z]{2}\s+\d{1,2}\s+\d{4})$", text)
-            dt_iso = None
+            # Expect tail like " - Nov 05 2025" (allow any case and trailing spaces)
+            m = re.search(r"-\s+([A-Za-z]{3}\s+\d{1,2}\s+\d{4})\s*$", text, re.I)
+            dt_obj = None
             if m:
                 try:
-                    dt_iso = datetime.strptime(m.group(1), "%b %d %Y").date().isoformat()
+                    dt_obj = datetime.strptime(m.group(1), "%b %d %Y").date()
                 except Exception:
                     pass
 
-            # today/future only
-            if dt_iso and dt_iso >= _today_denver_str():
+            # today/future only (Denver)
+            if dt_obj and dt_obj >= _today_denver():
                 items.append({
                     "city": "Alamosa",
                     "title": "City Council Regular Meeting" if "REGULAR" in up else "City Council Special Meeting",
-                    "date": dt_iso,
+                    "date": dt_obj.isoformat(),
                     "time": None,
                     "location": None,
                     "agenda_url": None,
@@ -162,7 +172,7 @@ def parse_alamosa() -> List[Dict]:
 
         # Visible detail (should be today's/next City Council meeting)
         detail_item = _parse_main_detail(html)
-        if detail_item and (not detail_item["date"] or detail_item["date"] >= _today_denver_str()):
+        if detail_item:
             items.append(detail_item)
 
         # Future dates from the sidebar

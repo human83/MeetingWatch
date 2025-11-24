@@ -141,7 +141,7 @@ def _time_from_agenda_pdf(url: str, session: requests.Session) -> Optional[str]:
         return None
 
 def _is_wanted(body: str, mtg_type: str) -> bool:
-    return "council" in (body or "").lower()
+    return "council" in (body or "").lower() or "council" in (mtg_type or "").lower()
 
 # Boilerplate/headers we don't want as bullets
 _DROP_PATTERNS = [

@@ -10,6 +10,8 @@ from typing import List, Dict, Optional
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
+from .utils import make_meeting
+
 PORTAL_URL = "https://cityofalamosa.diligent.community/Portal/MeetingInformation.aspx?Org=Cal&Id=115"
 ALAMOSA_TZ = "America/Denver"
 
@@ -89,17 +91,20 @@ def _parse_main_detail(html: str) -> Optional[Dict]:
         pdf_url = ("https://cityofalamosa.diligent.community" + href) if href.startswith("/") else href
 
     title = "City Council " + ("Regular Meeting" if "REGULAR" in mtg_type.upper() else "Special Meeting")
-    return {
-        "city": "Alamosa",
-        "title": title,
-        "date": date_iso,
-        "time": time_text,
-        "location": location,
-        "agenda_url": pdf_url,
-        "agenda_text_url": None,
-        "source": PORTAL_URL,
-        "tags": ["City Council"],
-    }
+    meeting = make_meeting(
+        city_or_body="Alamosa",
+        meeting_type=title,
+        date=date_iso,
+        start_time_local=time_text,
+        status="Scheduled",
+        location=location,
+        agenda_url=pdf_url,
+        agenda_summary=[],
+        source=PORTAL_URL,
+    )
+    meeting["agenda_text_url"] = None
+    meeting["tags"] = ["City Council"]
+    return meeting
 
 
 def _parse_upcoming_sidebar(html: str) -> List[Dict]:
@@ -131,17 +136,21 @@ def _parse_upcoming_sidebar(html: str) -> List[Dict]:
 
             # today/future only (Denver)
             if dt_obj and dt_obj >= _today_denver():
-                items.append({
-                    "city": "Alamosa",
-                    "title": "City Council Regular Meeting" if "REGULAR" in up else "City Council Special Meeting",
-                    "date": dt_obj.isoformat(),
-                    "time": None,
-                    "location": None,
-                    "agenda_url": None,
-                    "agenda_text_url": None,
-                    "source": PORTAL_URL,
-                    "tags": ["City Council"],
-                })
+                title = "City Council Regular Meeting" if "REGULAR" in up else "City Council Special Meeting"
+                meeting = make_meeting(
+                    city_or_body="Alamosa",
+                    meeting_type=title,
+                    date=dt_obj.isoformat(),
+                    start_time_local=None,
+                    status="Scheduled",
+                    location=None,
+                    agenda_url=None,
+                    agenda_summary=[],
+                    source=PORTAL_URL,
+                )
+                meeting["agenda_text_url"] = None
+                meeting["tags"] = ["City Council"]
+                items.append(meeting)
     return items
 
 

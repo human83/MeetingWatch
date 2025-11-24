@@ -9,6 +9,8 @@ from urllib.parse import urljoin
 import requests
 from bs4 import BeautifulSoup
 
+from .utils import make_meeting, summarize_pdf_if_any
+
 CITY_NAME = "El Paso County"
 PROVIDER = "AgendaSuite"
 BASE = "https://www.agendasuite.org/iip/elpaso"
@@ -163,15 +165,20 @@ def _discover_from_homepage() -> List[Dict]:
             continue
 
         detail = urljoin(BASE, href)
-        items.append({
-            "city": CITY_NAME,
-            "provider": PROVIDER,
-            "title": "Board of County Commissioners",  # will refine after detail fetch
-            "date": iso,
-            "time": time_str or "",
-            "url": detail,
-            "source": BASE,
-        })
+        meeting = make_meeting(
+            city_or_body=CITY_NAME,
+            meeting_type="Board of County Commissioners",  # will refine after detail fetch
+            date=iso,
+            start_time_local=time_str or "",
+            status="Scheduled",
+            location=None,
+            agenda_url=None,
+            agenda_summary=[],
+            source=BASE,
+        )
+        meeting["provider"] = PROVIDER
+        meeting["url"] = detail
+        items.append(meeting)
 
     return items
 
@@ -184,16 +191,20 @@ def parse_epc() -> List[Dict]:
         try:
             info = _extract_detail_info(m["url"])
             # Update title if we have a better one and still not a work session.
-            t = info.get("title") or m.get("title") or ""
+            t = info.get("title") or m.get("meeting_type") or ""
             if BLOCK_TITLE_RE.search(t or ""):
                 # Safety: drop if detail page shows it's a work session.
                 continue
 
-            m["title"] = t or "Board of County Commissioners"
+            m["meeting_type"] = t or "Board of County Commissioners"
             if info.get("location"):
                 m["location"] = info["location"]
             if info.get("agenda_url"):
                 m["agenda_url"] = info["agenda_url"]
+                summary = summarize_pdf_if_any(m["agenda_url"])
+                if summary:
+                    m["agenda_summary"] = summary
+
 
             # Provide a consistent Mountain Time zone for downstream rendering if your pipeline uses it.
             m["tz"] = "America/Denver"
@@ -219,4 +230,4 @@ def parse() -> List[Dict]:
 
 if __name__ == "__main__":
     for it in parse_epc():
-        print(" -", it.get("date"), it.get("time"), it.get("title"), "->", it.get("url"))
+        print(" -", it.get("date"), it.get("time"), it.get("meeting_type"), "->", it.get("url"))

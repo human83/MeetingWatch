@@ -43,7 +43,14 @@ def make_meeting(
     agenda_summary,
     source: str,
 ) -> Dict:
+    city = city_or_body
+    body = None
+    if " — " in city_or_body:
+        city, body = city_or_body.split(" — ", 1)
+
     return {
+        "city": city,
+        "body": body,
         "city_or_body": city_or_body,
         "meeting_type": meeting_type,
         "date": date,

@@ -11,6 +11,8 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil import parser as _dtparser
 
+from .utils import make_meeting, summarize_pdf_if_any
+
 try:
     from playwright.sync_api import sync_playwright
 except Exception:  # pragma: no cover
@@ -156,16 +158,20 @@ def _scan_tiles_bs4(soup: BeautifulSoup, source_url: str) -> List[Dict]:
 
         title = _extract_text(tag) or "Meeting"
 
-        items.append(
-            {
-                "city": CITY_NAME,
-                "provider": PROVIDER,
-                "title": title[:150],
-                "date": iso or "",
-                "url": full,
-                "source": source_url,
-            }
+        meeting = make_meeting(
+            city_or_body=CITY_NAME,
+            meeting_type=title[:150],
+            date=iso or "",
+            start_time_local=None,
+            status="Scheduled",
+            location=None,
+            agenda_url=None,
+            agenda_summary=[],
+            source=source_url,
         )
+        meeting["provider"] = PROVIDER
+        meeting["url"] = full
+        items.append(meeting)
     return items
 
 def _requests_candidates(url: str) -> List[Dict]:
@@ -265,14 +271,20 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
                 if url in seen:
                     continue
                 seen.add(url)
-                items.append({
-                    "city": CITY_NAME,
-                    "provider": PROVIDER,
-                    "title": (txt or "Meeting")[:150] or "Meeting",
-                    "date": _parse_date(txt) or "",
-                    "url": url,
-                    "source": entry_url,
-                })
+                meeting = make_meeting(
+                    city_or_body=CITY_NAME,
+                    meeting_type=(txt or "Meeting")[:150] or "Meeting",
+                    date=_parse_date(txt) or "",
+                    start_time_local=None,
+                    status="Scheduled",
+                    location=None,
+                    agenda_url=None,
+                    agenda_summary=[],
+                    source=entry_url,
+                )
+                meeting["provider"] = PROVIDER
+                meeting["url"] = url
+                items.append(meeting)
 
             out.extend(items[:MAX_TILES])
 
@@ -292,14 +304,20 @@ def _playwright_candidates(entry_url: str) -> List[Dict]:
                             if "/event/" in full:
                                 if not full.endswith("/files"):
                                     full = _normalize(full, "files")
-                                out.append({
-                                    "city": CITY_NAME,
-                                    "provider": PROVIDER,
-                                    "title": (text or "Meeting")[:150],
-                                    "date": _parse_date(text) or "",
-                                    "url": full,
-                                    "source": _normalize(entry_url, path),
-                                })
+                                meeting = make_meeting(
+                                    city_or_body=CITY_NAME,
+                                    meeting_type=(text or "Meeting")[:150],
+                                    date=_parse_date(text) or "",
+                                    start_time_local=None,
+                                    status="Scheduled",
+                                    location=None,
+                                    agenda_url=None,
+                                    agenda_summary=[],
+                                    source=_normalize(entry_url, path),
+                                )
+                                meeting["provider"] = PROVIDER
+                                meeting["url"] = full
+                                out.append(meeting)
                         if out:
                             break
                     except Exception:
@@ -568,7 +586,7 @@ def parse_salida() -> List[Dict]:
     seen: Set[Tuple[str, str, str]] = set()
     unique: List[Dict] = []
     for m in discovered:
-        key = (m.get("date", "") or "", m.get("title", "") or "", m.get("url", "") or "")
+        key = (m.get("date", "") or "", m.get("meeting_type", "") or "", m.get("url", "") or "")
         if key not in seen:
             seen.add(key)
             unique.append(m)
@@ -592,7 +610,7 @@ def parse_salida() -> List[Dict]:
                 return True
 
             before = len(unique)
-            unique = [m for m in unique if _is_council_meeting(m.get("title"))]
+            unique = [m for m in unique if _is_council_meeting(m.get("meeting_type"))]
             if SALIDA_DEBUG:
                 dropped = before - len(unique)
                 if dropped:
@@ -602,11 +620,17 @@ def parse_salida() -> List[Dict]:
         u = (m.get("url") or "").strip()
         if u.lower().endswith(".pdf"):
             m["agenda_url"] = u
+            summary = summarize_pdf_if_any(u)
+            if summary:
+                m["agenda_summary"] = summary
             continue
 
         pdf, txt = find_agenda_pdf(u)
         if pdf:
             m["agenda_url"] = pdf
+            summary = summarize_pdf_if_any(pdf)
+            if summary:
+                m["agenda_summary"] = summary
         if txt:
             m["agenda_text_url"] = txt
 
@@ -622,4 +646,4 @@ if __name__ == "__main__":
     items = parse_salida()
     print(f"[salida] parse() produced {len(items)} items")
     for m in items[:5]:
-        print(" -", m.get("date"), m.get("title"), "->", m.get("url"))
+        print(" -", m.get("date"), m.get("meeting_type"), "->", m.get("url"))

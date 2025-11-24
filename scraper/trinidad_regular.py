@@ -22,6 +22,8 @@ import requests
 from bs4 import BeautifulSoup
 from dateutil import tz
 
+from .utils import make_meeting
+
 log = logging.getLogger("trinidad")
 if not log.handlers:
     _h = logging.StreamHandler()
@@ -176,19 +178,20 @@ def _extract_event(day_url: str) -> dict | None:
 
     # Build result
     ev_id = parse_qs(urlparse(day_url).query).get("id", [""])[0]
-    result = {
-        "city": "Trinidad",
-        "title": "City Council Regular Meeting",
-        "start_dt": start_dt.isoformat(),
-        "end_dt": None,  # can be added if we want to parse end_s
-        "date_str": start_dt.astimezone(MT_TZ).strftime("%A, %B %-d, %Y"),
-        "location": loc or "City Council Chambers, City Hall (Trinidad, CO)",
-        "agenda_text": agenda_text,
-        "agenda_bullets": [],  # summarize step will fill if/when we ever get PDFs/text
-        "source_url_detail_url": day_url,
-        "event_id": ev_id,
-    }
-    return result
+    meeting = make_meeting(
+        city_or_body="Trinidad",
+        meeting_type="City Council Regular Meeting",
+        date=start_dt.date().isoformat(),
+        start_time_local=start_dt.strftime("%-I:%M %p"),
+        status="Scheduled",
+        location=loc or "City Council Chambers, City Hall (Trinidad, CO)",
+        agenda_url=None, # No agenda PDFs found on this site
+        agenda_summary=[],
+        source=day_url,
+    )
+    meeting["event_id"] = ev_id
+    meeting["agenda_text"] = agenda_text
+    return meeting
 
 def collect(months_ahead: int = 3) -> list[dict]:
     candidates = _gather_candidates(months_ahead=months_ahead)

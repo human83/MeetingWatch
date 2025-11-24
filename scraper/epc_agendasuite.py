@@ -142,12 +142,17 @@ def _discover_from_homepage() -> List[Dict]:
 
     items: List[Dict] = []
     # The "Upcoming meetings" box appears in a column with class "nextmeetings"
-    # Each li contains an <a href="/iip/elpaso/meeting/details/<id>">MM/DD/YYYY at HH:MM AM/PM for Board of County Commissioners</a>
-    for a in soup.select("div.nextmeetings a[href]"):
-        t = _text(a)
-        href = a.get("href") or ""
-        if not href:
-            continue
+    # Each li contains an <a href="/iip/elpaso/meeting/details/<id>">...</a> OR plain text
+    for li in soup.select("div.nextmeetings li"):
+        a = li.find("a", href=True)
+        detail = None
+        if a:
+            t = _text(a)
+            href = a.get("href") or ""
+            if href:
+                detail = urljoin(BASE, href)
+        else:
+            t = _text(li)
 
         # Keep only BOCC regular meetings; exclude "Work Session" etc.
         if not ALLOW_TITLE_RE.search(t):
@@ -164,7 +169,6 @@ def _discover_from_homepage() -> List[Dict]:
         if iso < _today_iso_denver():
             continue
 
-        detail = urljoin(BASE, href)
         meeting = make_meeting(
             city_or_body=CITY_NAME,
             meeting_type="Board of County Commissioners",  # will refine after detail fetch
@@ -177,7 +181,8 @@ def _discover_from_homepage() -> List[Dict]:
             source=BASE,
         )
         meeting["provider"] = PROVIDER
-        meeting["url"] = detail
+        if detail:
+            meeting["url"] = detail
         items.append(meeting)
 
     return items
@@ -188,6 +193,13 @@ def parse_epc() -> List[Dict]:
     accepted: List[Dict] = []
 
     for m in items:
+        # If there's no URL, we can't get more info, but we can still accept it
+        if not m.get("url"):
+            # Provide a consistent Mountain Time zone for downstream rendering
+            m["tz"] = "America/Denver"
+            accepted.append(m)
+            continue
+
         try:
             info = _extract_detail_info(m["url"])
             # Update title if we have a better one and still not a work session.

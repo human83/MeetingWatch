@@ -218,7 +218,7 @@ def _filter_bullets(bullets: List[str], *, limit: int = BULLET_LIMIT) -> List[st
 
 # --- Main --------------------------------------------------------------------
 
-def _parse_legistar_api() -> List[Dict]:
+def parse_legistar() -> List[Dict]:
     """
     Fetch events from Legistar, enrich with derived time and agenda summary.
     Returns a list of dicts created by utils.make_meeting.
@@ -309,94 +309,5 @@ def _parse_legistar_api() -> List[Dict]:
                 source="https://coloradosprings.legistar.com/Calendar.aspx",
             )
         )
-    return meetings
-
-
-def parse_legistar() -> List[Dict]:
-    """
-    Fetch events from Legistar calendar page using Playwright,
-    as the API is often incomplete.
-    Falls back to the API if Playwright is unavailable.
-    """
-    if sync_playwright is None:
-        return _parse_legistar_api()
-
-    meetings: List[Dict] = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page()
-        try:
-            page.goto(CALENDAR_URL, wait_until="networkidle")
-            # The selector for the meetings table body
-            table_body_selector = "#ctl00_ContentPlaceHolder1_gridCalendar_ctl00 > tbody"
-            page.wait_for_selector(table_body_selector)
-            
-            rows = page.locator(f"{table_body_selector} > tr").all()
-            today = datetime.now(MT).date()
-
-            for row in rows:
-                cells = row.locator("td").all()
-                if len(cells) < 8:
-                    continue
-
-                mtg_type = cells[0].text_content().strip()
-                date_str_raw = cells[1].text_content().strip()
-                
-                try:
-                    event_date = datetime.strptime(date_str_raw, "%m/%d/%Y").date()
-                    if event_date < today:
-                        continue
-                except (ValueError, IndexError):
-                    continue
-                
-                date_str = event_date.isoformat()
-
-                if not _is_wanted(mtg_type, mtg_type):
-                    continue
-
-                start_time_local = cells[3].text_content().strip() or "Time TBD"
-                location = cells[4].text_content().strip()
-
-                # Find agenda link
-                agenda_cell = cells[5]
-                agenda_link_el = agenda_cell.locator("a[href*='View.ashx?M=A']").first
-                agenda_url = None
-                if agenda_link_el:
-                    href = agenda_link_el.get_attribute("href")
-                    if href:
-                        agenda_url = urljoin(CALENDAR_URL, href)
-
-                # Summarize agenda
-                summary: List[str] = []
-                if agenda_url:
-                    try:
-                        raw_bullets = summarize_pdf_if_any(agenda_url) or []
-                        summary = _filter_bullets(raw_bullets, limit=BULLET_LIMIT)
-                    except Exception as e:
-                        _LOG.warning("Agenda summary failed for %s: %s", agenda_url, e)
-
-                meetings.append(
-                    make_meeting(
-                        city_or_body="Colorado Springs — City Council",
-                        meeting_type=mtg_type or "City Council Meeting",
-                        date=date_str,
-                        start_time_local=start_time_local,
-                        status="Scheduled",
-                        location=location,
-                        agenda_url=agenda_url,
-                        agenda_summary=summary,
-                        source=CALENDAR_URL,
-                    )
-                )
-
-        except Exception as e:
-            _LOG.error("Playwright scraping failed for Legistar: %s", e)
-        finally:
-            browser.close()
-
-    if not meetings:
-        _LOG.warning("Playwright scraping for Legistar returned no meetings, falling back to API.")
-        return _parse_legistar_api()
 
     return meetings
-

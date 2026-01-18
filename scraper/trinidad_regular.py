@@ -87,16 +87,19 @@ def parse_trinidad() -> list[dict]:
             if not agenda_link_tag or not agenda_link_tag.has_attr("href"):
                 continue
 
-                        href = agenda_link_tag["href"]
-                        
-                        # URL-encode the path part of the href, including any spaces in the filename.
-                        # The server appears to expect filenames with spaces in them.
-                        path_part, *query_part = href.split('?', 1)
-                        safe_path = quote(path_part.strip())
-                        safe_href = '?'.join([safe_path] + query_part)
+            href = agenda_link_tag["href"]
+
+            # URL-encode the path part of the href, including any spaces in the filename.
+            # The server appears to expect filenames with spaces in them, so we do not sanitize.
+            path_part, *query_part = href.split('?', 1)
+            safe_path = quote(path_part.strip())
+            safe_href = '?'.join([safe_path] + query_part)
+
+            agenda_url = urljoin(BASE_PDF_URL, safe_href)
             
-                        agenda_url = urljoin(BASE_PDF_URL, safe_href)            
             summary = summarize_pdf_if_any(agenda_url)
+            
+            source_page_url = f"{BASE_PAGE_URL}{year}.php"
 
             # Create meeting object
             meeting = make_meeting(
@@ -108,7 +111,7 @@ def parse_trinidad() -> list[dict]:
                 location="City Council Chambers, City Hall (Trinidad, CO)",
                 agenda_url=agenda_url,
                 agenda_summary=summary,
-                source=f"{BASE_PAGE_URL}{year}.php",
+                source=source_page_url,
             )
             meetings.append(meeting)
 

@@ -29,7 +29,7 @@ log.setLevel(logging.INFO)
 # --- Scraper ---
 def fetch_year_page(year: int) -> BeautifulSoup | None:
     """Fetches the agenda page for a given year."""
-    url = f"{BASE_URL}{year}.php"
+    url = f"{BASE_PAGE_URL}{year}.php"
     try:
         response = requests.get(url, timeout=30)
         response.raise_for_status()

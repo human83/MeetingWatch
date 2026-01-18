@@ -86,9 +86,12 @@ def parse_trinidad() -> list[dict]:
 
             href = agenda_link_tag["href"]
             
-            # URL-encode the path part of the href to handle spaces (e.g., "Agenda 1.20.26 .pdf")
-            # split query string from path to ensure only path is quoted
-            path_part, *query_part = href.split('?', 1)
+            # Sanitize the href from the website, which may contain typos
+            # like extra spaces before the file extension (e.g., "Agenda 1.20.26 .pdf")
+            sanitized_href = href.replace(" .pdf", ".pdf")
+
+            # URL-encode the path part of the href to handle spaces
+            path_part, *query_part = sanitized_href.split('?', 1)
             safe_path = quote(path_part.strip())
             safe_href = '?'.join([safe_path] + query_part)
 

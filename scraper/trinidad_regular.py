@@ -8,10 +8,13 @@ from urllib.parse import urljoin, quote
 import requests
 from bs4 import BeautifulSoup
 
-from .utils import make_meeting, MT_TZ, _extract_first_pages_text, _openai_bullets, _DEFAULT_MAX_PAGES, _DEFAULT_MODEL, _DEFAULT_HTTP_TIMEOUT
+from .utils import make_meeting, summarize_pdf_if_any, MT_TZ
 
 # --- Constants ---
-BASE_URL = "https://www.trinidad.co.gov/government/agendas___minutes/"
+# The correct base URL for PDFs, found via browser redirection
+BASE_PDF_URL = "https://cms2.revize.com/revize/trinidadco/" 
+# The public-facing page where the links are found
+BASE_PAGE_URL = "https://www.trinidad.co.gov/government/agendas___minutes/" 
 MEETING_TYPE = "City Council Regular Meeting"
 
 # --- Logging ---
@@ -95,28 +98,9 @@ def parse_trinidad() -> list[dict]:
             safe_path = quote(path_part.strip())
             safe_href = '?'.join([safe_path] + query_part)
 
-            agenda_url = urljoin(BASE_URL, safe_href)
+            agenda_url = urljoin(BASE_PDF_URL, safe_href)
             
-            # --- BEGIN CUSTOM PDF FETCH AND SUMMARIZATION FOR TRINIDAD ---
-            summary = []
-            try:
-                # Use a general User-Agent to avoid potential blocks
-                headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"}
-                response = requests.get(agenda_url, timeout=_DEFAULT_HTTP_TIMEOUT, headers=headers)
-                response.raise_for_status() # Raise an exception for HTTP errors (4xx or 5xx)
-
-                content_type = response.headers.get("Content-Type", "").lower()
-                if "application/pdf" in content_type:
-                    pdf_bytes = response.content
-                    text = _extract_first_pages_text(pdf_bytes, max_pages=_DEFAULT_MAX_PAGES)
-                    if text:
-                        summary = _openai_bullets(text, model=_DEFAULT_MODEL) or []
-                else:
-                    log.warning(f"URL {agenda_url} did not return a PDF (Content-Type: {content_type})")
-
-            except requests.RequestException as e:
-                log.error(f"Failed to fetch or process PDF for {agenda_url}: {e}")
-            # --- END CUSTOM PDF FETCH AND SUMMARIZATION ---
+            summary = summarize_pdf_if_any(agenda_url)
 
             # Create meeting object
             meeting = make_meeting(
@@ -128,7 +112,7 @@ def parse_trinidad() -> list[dict]:
                 location="City Council Chambers, City Hall (Trinidad, CO)",
                 agenda_url=agenda_url,
                 agenda_summary=summary,
-                source=f"{BASE_URL}{year}.php",
+                source=f"{BASE_PAGE_URL}{year}.php",
             )
             meetings.append(meeting)
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from urllib.parse import urljoin
+from urllib.parse import urljoin, quote
 
 import requests
 from bs4 import BeautifulSoup
@@ -84,7 +84,15 @@ def parse_trinidad() -> list[dict]:
             if not agenda_link_tag or not agenda_link_tag.has_attr("href"):
                 continue
 
-            agenda_url = urljoin(BASE_URL, agenda_link_tag["href"])
+            href = agenda_link_tag["href"]
+            
+            # URL-encode the path part of the href to handle spaces (e.g., "Agenda 1.20.26 .pdf")
+            # split query string from path to ensure only path is quoted
+            path_part, *query_part = href.split('?', 1)
+            safe_path = quote(path_part.strip())
+            safe_href = '?'.join([safe_path] + query_part)
+
+            agenda_url = urljoin(BASE_URL, safe_href)
             
             # Summarize the agenda
             summary = summarize_pdf_if_any(agenda_url)

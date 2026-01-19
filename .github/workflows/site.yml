@@ -279,6 +279,20 @@ jobs:
             const res = await fetch('data/meetings.json', {cache:'no-store'});
             const raw = await res.json();
             const items = Array.isArray(raw) ? raw : (raw.meetings || []);
+
+            // Sort by date and time to ensure chronological order
+            items.sort((a, b) => {
+              const dateA = a.date || '';
+              const timeA = a.start_time_local || a.start_time || a.time || '';
+              const dateB = b.date || '';
+              const timeB = b.start_time_local || b.start_time || b.time || '';
+            
+              if (dateA < dateB) return -1;
+              if (dateA > dateB) return 1;
+              if (timeA < timeB) return -1;
+              if (timeA > timeB) return 1;
+              return 0;
+            });
           
             const citySel = document.getElementById('citySelect');
             const srcSel  = document.getElementById('sourceSelect');

@@ -43,6 +43,20 @@ SALIDA_COUNCIL_BLOCK_RE = re.compile(os.getenv(
     r"\b(work[\s-]*session|worksession|study[\s-]*session|workshop|retreat|strategy[\s-]*session)\b"
 ), re.I)
 
+
+def _classify_salida_title(title: str) -> Optional[str]:
+    """
+    Classifies a Salida meeting title into a standard type.
+    Returns 'City Council Meeting', 'City Council Work Session', or None if it's not a recognized council meeting.
+    """
+    t = (title or "").strip()
+    if not SALIDA_COUNCIL_ALLOW_RE.search(t):
+        return None  # Not a council meeting
+    if SALIDA_COUNCIL_BLOCK_RE.search(t):
+        return "City Council Work Session"
+    return "City Council Meeting"
+
+
 CITY_NAME = "Salida"
 PROVIDER = "CivicClerk"
 
@@ -597,24 +611,16 @@ def parse_salida() -> List[Dict]:
                 m for m in unique
                 if (m.get("date") or "") >= cutoff
             ]
-        # --- Keep only City Council meetings; drop work/study/workshop/retreat sessions ---
-        if SALIDA_ONLY_COUNCIL:
-            def _is_council_meeting(title: str) -> bool:
-                t = (title or "").strip()
-                if not t:
-                    return False
-                if not SALIDA_COUNCIL_ALLOW_RE.search(t):
-                    return False
-                if SALIDA_COUNCIL_BLOCK_RE.search(t):
-                    return False
-                return True
-
-            before = len(unique)
-            unique = [m for m in unique if _is_council_meeting(m.get("meeting_type"))]
-            if SALIDA_DEBUG:
-                dropped = before - len(unique)
-                if dropped:
-                    print(f"[salida] council filter dropped {dropped} non-meeting item(s)")
+        # --- Standardize meeting types and filter to relevant council meetings ---
+        processed = []
+        for m in unique:
+            classified_type = _classify_salida_title(m.get("meeting_type"))
+            if classified_type:
+                m["meeting_type"] = classified_type
+                processed.append(m)
+        unique = processed
+        if SALIDA_DEBUG:
+            print(f"[salida] Classified and filtered to {len(unique)} council meetings")
 
     for m in unique:
         u = (m.get("url") or "").strip()

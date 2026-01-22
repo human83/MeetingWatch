@@ -6,6 +6,7 @@ from datetime import datetime, date
 from zoneinfo import ZoneInfo
 import re
 from typing import List, Dict, Optional
+from urllib.parse import urljoin
 
 from playwright.sync_api import sync_playwright, Page
 
@@ -78,7 +79,7 @@ def _parse_meeting_detail_page(page: Page, meeting_url: str) -> Optional[Dict]:
     if pdf_link_el.is_visible():
         pdf_href = pdf_link_el.get_attribute("href")
         if pdf_href:
-            pdf_url = page.urljoin(pdf_href)
+            pdf_url = urljoin(page.url, pdf_href)
             print(f"[alamosa] Found agenda PDF: {pdf_url}")
             summary = summarize_pdf_if_any(pdf_url) or []
             if summary:
@@ -122,7 +123,7 @@ def parse_alamosa() -> List[Dict]:
             print(f"[alamosa] Found {len(meeting_links)} potential meeting links across all sections.")
             
             detail_urls = list(dict.fromkeys(
-                page.urljoin(link.get_attribute('href')) for link in meeting_links if link.get_attribute('href')
+                urljoin(page.url, link.get_attribute('href')) for link in meeting_links if link.get_attribute('href')
             ))
             
             print(f"[alamosa] Found {len(detail_urls)} unique detail URLs to scrape.")

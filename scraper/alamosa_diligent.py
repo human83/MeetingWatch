@@ -8,7 +8,7 @@ import re
 from typing import List, Dict, Optional
 
 from bs4 import BeautifulSoup
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, Page
 
 from .utils import make_meeting, summarize_pdf_if_any
 
@@ -25,120 +25,125 @@ def _norm_space(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip())
 
 
+def _parse_meeting_detail_page(page: Page, meeting_url: str) -> Optional[Dict]:
+    """
+    Parses a specific meeting detail page (MeetingInformation.aspx) to extract
+    all information, including the PDF URL for summarization.
+    """
+    print(f"[alamosa] Parsing detail page: {meeting_url}")
+    try:
+        page.goto(meeting_url, wait_until="domcontentloaded")
+    except Exception as e:
+        print(f"[alamosa] Failed to navigate to detail page {meeting_url}: {e}")
+        return None
+
+    header_el = page.locator("h1.ContentLg").first
+    if not header_el.is_visible():
+        print("[alamosa] Could not find header element on detail page.")
+        return None
+    
+    header_text = _norm_space(header_el.inner_text()).upper()
+
+    mtg_type = None
+    for t in WANTED_TYPES:
+        if t in header_text:
+            mtg_type = t.title()
+            break
+    if not mtg_type:
+        print(f"[alamosa] Skipping page, type not wanted: {header_text}")
+        return None
+
+    date_match = re.search(r"-\s+([A-Z]{3}\s+\d{1,2}\s+\d{4})$", header_text)
+    if not date_match:
+        print(f"[alamosa] Could not parse date from header: {header_text}")
+        return None
+    
+    try:
+        date_obj = datetime.strptime(date_match.group(1), "%b %d %Y").date()
+    except ValueError:
+        print(f"[alamosa] Could not parse date string from header: '{date_match.group(1)}'")
+        return None
+
+    if date_obj < _today_denver():
+        print(f"[alamosa] Skipping past meeting from {date_obj.isoformat()}")
+        return None
+
+    time_el = page.locator("label:has-text('Time:') + div").first
+    time_str = _norm_space(time_el.inner_text()) if time_el.is_visible() else None
+
+    loc_el = page.locator("label:has-text('Location:') + div").first
+    location_str = _norm_space(loc_el.inner_text()) if loc_el.is_visible() else None
+
+    pdf_url, summary = None, []
+    pdf_link_el = page.locator("a#document-cover-pdf[href]").first
+    if pdf_link_el.is_visible():
+        pdf_href = pdf_link_el.get_attribute("href")
+        if pdf_href:
+            pdf_url = page.urljoin(pdf_href)
+            print(f"[alamosa] Found agenda PDF: {pdf_url}")
+            summary = summarize_pdf_if_any(pdf_url) or []
+            if summary:
+                print(f"[alamosa] Successfully generated {len(summary)} summary bullets.")
+
+    return make_meeting(
+        city_or_body="Alamosa",
+        meeting_type=mtg_type,
+        date=date_obj.isoformat(),
+        start_time_local=time_str,
+        status="Scheduled",
+        location=location_str,
+        agenda_url=pdf_url,
+        agenda_summary=summary,
+        source=meeting_url,
+    )
+
+
 def parse_alamosa() -> List[Dict]:
     """
-    Entry point. Uses Playwright to render the MeetingSchedule page, then
-    iterates through the meeting list to find upcoming council meetings.
-    For each, it navigates to the detail page to find the agenda PDF and summarize it.
+    Entry point for Alamosa scraper. Finds links in "Today's" and "Upcoming"
+    sections on the main schedule page and scrapes each one.
     """
     print(f"[alamosa] starting; url: {PORTAL_URL}")
     items: List[Dict] = []
-
+    
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page()
-        page.set_default_timeout(35000) # Increased timeout for multi-page navigation
+        page.set_default_timeout(30000)
 
         try:
             print(f"[alamosa] Navigating to {PORTAL_URL}")
-            page.goto(PORTAL_URL, wait_until="domcontentloaded")
+            page.goto(PORTAL_URL, wait_until="networkidle")
+
+            link_selector = "div.MeetingUpcoming a[href*='MeetingInformation.aspx']"
+            page.wait_for_selector(link_selector, timeout=20000)
             
-            # This selector targets the rows in the main meetings grid
-            row_selector = "tr.dxgvDataRow"
-            page.wait_for_selector(row_selector, timeout=15000)
-            meeting_rows = page.locator(row_selector).all()
+            meeting_links = page.locator(link_selector).all()
+            print(f"[alamosa] Found {len(meeting_links)} potential meeting links.")
+            
+            detail_urls = list(dict.fromkeys(
+                page.urljoin(link.get_attribute('href')) for link in meeting_links
+            ))
+            
+            print(f"[alamosa] Found {len(detail_urls)} unique detail URLs to scrape.")
 
-            print(f"[alamosa] Found {len(meeting_rows)} potential meeting rows.")
-
-            for i, row in enumerate(meeting_rows):
-                # Extract text from all cells to check for meeting type
-                cells_text = "".join(row.locator("td").all_inner_texts())
-                row_text_upper = _norm_space(cells_text).upper()
-
-                mtg_type = None
-                for t in WANTED_TYPES:
-                    if t in row_text_upper:
-                        mtg_type = t.title()
-                        break
-                
-                if not mtg_type:
-                    continue
-
-                print(f"[alamosa] Found council meeting in row {i}: {mtg_type}")
-
-                # Date is in the first column
-                date_str = _norm_space(row.locator("td").nth(0).inner_text())
-                try:
-                    date_obj = datetime.strptime(date_str, "%A, %B %d, %Y").date()
-                except ValueError:
-                    print(f"[alamosa] Could not parse date: '{date_str}'")
-                    continue
-
-                # Filter out past meetings
-                if date_obj < _today_denver():
-                    print(f"[alamosa] Skipping past meeting on {date_obj.isoformat()}")
-                    continue
-
-                time_str = _norm_space(row.locator("td").nth(1).inner_text())
-                location_str = _norm_space(row.locator("td").nth(2).inner_text())
-
-                # Find the link to the meeting detail page
-                detail_link_el = row.locator("a[href*='MeetingDetail.aspx']").first
-                if not detail_link_el:
-                    print(f"[alamosa] No detail link found for meeting on {date_obj.isoformat()}")
-                    continue
-                
-                detail_url = page.urljoin(detail_link_el.get_attribute("href"))
-                print(f"[alamosa] Navigating to detail page: {detail_url}")
-
-                # Visit detail page to get PDF link
-                pdf_url = None
-                summary = []
-                try:
-                    detail_page = browser.new_page()
-                    detail_page.goto(detail_url, wait_until="domcontentloaded")
-                    
-                    pdf_link_el = detail_page.locator("a#document-cover-pdf[href]").first
-                    if pdf_link_el:
-                        pdf_href = pdf_link_el.get_attribute("href")
-                        if pdf_href:
-                            pdf_url = detail_page.urljoin(pdf_href)
-                            print(f"[alamosa] Found agenda PDF: {pdf_url}")
-                            # Now that we have a PDF, summarize it
-                            summary = summarize_pdf_if_any(pdf_url) or []
-                            if summary:
-                                print(f"[alamosa] Successfully generated {len(summary)} summary bullets.")
-                    else:
-                        print(f"[alamosa] No agenda PDF link found on detail page.")
-                        
-                    detail_page.close()
-                except Exception as e:
-                    print(f"[alamosa] Error processing detail page {detail_url}: {e}")
-                    if "detail_page" in locals() and not detail_page.is_closed():
-                        detail_page.close()
-
-
-                meeting = make_meeting(
-                    city_or_body="Alamosa",
-                    meeting_type=mtg_type,
-                    date=date_obj.isoformat(),
-                    start_time_local=time_str if time_str != "N/A" else None,
-                    status="Scheduled",
-                    location=location_str if location_str != "N/A" else None,
-                    agenda_url=pdf_url,
-                    agenda_summary=summary,
-                    source=detail_url, # Use the specific meeting detail URL as the source
-                )
-                meeting["tags"] = ["City Council"]
-                items.append(meeting)
+            for url in detail_urls:
+                meeting_item = _parse_meeting_detail_page(page, url)
+                if meeting_item:
+                    items.append(meeting_item)
 
         except Exception as e:
             print(f"[alamosa] A critical error occurred during scraping: {e}")
+            try:
+                page.screenshot(path="alamosa_error_screenshot.png")
+                print("[alamosa] Debugging screenshot saved to alamosa_error_screenshot.png")
+            except Exception as se:
+                print(f"[alamosa] Could not save screenshot: {se}")
+
         finally:
             if browser.is_connected():
                 browser.close()
 
-    items.sort(key=lambda d: (d.get("date") or "9999-12-31", d.get("meeting_type") or ""))
-
-    print(f"[alamosa] produced {len(items)} item(s)")
-    return items
+    sorted_items = sorted(items, key=lambda d: (d.get("date") or "9999-12-31", d.get("meeting_type") or ""))
+    print(f"[alamosa] produced {len(sorted_items)} item(s)")
+    return sorted_items

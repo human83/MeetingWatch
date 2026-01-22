@@ -175,6 +175,7 @@ jobs:
         run: |
           cp demo.html _site/demo.html
 
+
       - name: Generate index.html from data/meetings.json
         run: |
           python - <<'PY'

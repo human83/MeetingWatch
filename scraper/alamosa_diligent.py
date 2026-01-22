@@ -12,20 +12,103 @@ from playwright.sync_api import sync_playwright, Page
 
 from .utils import make_meeting, summarize_pdf_if_any
 
-# Change the main URL to a specific, known-failing detail page for diagnostics.
-PORTAL_URL = "https://cityofalamosa.community.diligentoneplatform.com/Portal/MeetingInformation.aspx?Org=Cal&id=124"
+PORTAL_URL = "https://cityofalamosa.community.diligentoneplatform.com/Portal/MeetingSchedule.aspx"
 ALAMOSA_TZ = "America/Denver"
-WANTED_TYPES = ("CITY COUNCIL REGULAR MEETING", "CITY COUNCIL SPECIAL MEETING")
+WANTED_TYPES = ("CITY COUNCIL REGULAR MEETING", "CITY COUNCIL SPECIAL MEETING", "CITY COUNCIL WORK SESSION")
+
+
+def _today_denver() -> date:
+    return datetime.now(ZoneInfo(ALAMOSA_TZ)).date()
+
+
+def _norm_space(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip())
+
+
+def _parse_meeting_detail_page(page: Page, meeting_url: str) -> Optional[Dict]:
+    """
+    Parses a specific meeting detail page (MeetingInformation.aspx) to extract
+    all information, including the PDF URL for summarization.
+    """
+    print(f"[alamosa] Parsing detail page: {meeting_url}")
+    try:
+        page.goto(meeting_url, wait_until="domcontentloaded")
+    except Exception as e:
+        print(f"[alamosa] Failed to navigate to detail page {meeting_url}: {e}")
+        return None
+
+    # Use the correct h2 selector found in the diagnostic log
+    header_el = page.locator("h2#ctl00_MainContent_MeetingTitle").first
+    if not header_el.is_visible():
+        print(f"[alamosa] Could not find header element on {meeting_url}")
+        return None
+    
+    header_text = _norm_space(header_el.inner_text()).upper()
+
+    mtg_type = None
+    for t in WANTED_TYPES:
+        if t in header_text:
+            mtg_type = t.title()
+            break
+    if not mtg_type:
+        print(f"[alamosa] Skipping page, type not wanted: {header_text}")
+        return None
+
+    # Extract date from the full header text
+    date_match = re.search(r"-\s+([A-Z]{3}\s+\d{1,2}\s+\d{4})$", header_text)
+    if not date_match:
+        print(f"[alamosa] Could not parse date from header: {header_text}")
+        return None
+    
+    try:
+        date_obj = datetime.strptime(date_match.group(1), "%b %d %Y").date()
+    except ValueError:
+        print(f"[alamosa] Could not parse date string from header: '{date_match.group(1)}'")
+        return None
+
+    if date_obj < _today_denver():
+        print(f"[alamosa] Skipping past meeting from {date_obj.isoformat()}")
+        return None
+
+    # Use correct selectors for time and location from diagnostic log
+    time_el = page.locator("span#meeting-time").first
+    time_str = _norm_space(time_el.inner_text()) if time_el.is_visible() else None
+
+    loc_el = page.locator("span#meeting-location").first
+    location_str = _norm_space(loc_el.inner_text()) if loc_el.is_visible() else None
+
+    pdf_url, summary = None, []
+    # Use correct selector for PDF link from diagnostic log
+    pdf_link_el = page.locator("a#document-cover-pdf[href]").first
+    if pdf_link_el.is_visible():
+        pdf_href = pdf_link_el.get_attribute("href")
+        if pdf_href:
+            pdf_url = urljoin(page.url, pdf_href)
+            print(f"[alamosa] Found agenda PDF: {pdf_url}")
+            summary = summarize_pdf_if_any(pdf_url) or []
+            if summary:
+                print(f"[alamosa] Successfully generated {len(summary)} summary bullets.")
+
+    return make_meeting(
+        city_or_body="Alamosa",
+        meeting_type=mtg_type,
+        date=date_obj.isoformat(),
+        start_time_local=time_str,
+        status="Scheduled",
+        location=location_str,
+        agenda_url=pdf_url,
+        agenda_summary=summary,
+        source=meeting_url,
+    )
 
 
 def parse_alamosa() -> List[Dict]:
     """
-    DIAGNOSTIC MODE 2: This function will navigate to a specific meeting
-    detail page, wait for it to load, and then print the entire rendered
-    HTML content to the log for analysis.
+    Entry point for Alamosa scraper. Finds links in the "Today's", "Upcoming",
+    and "Recent" meeting sections on the main schedule page and scrapes each one.
     """
     print(f"[alamosa] starting; url: {PORTAL_URL}")
-    print("[alamosa] ##### RUNNING IN DIAGNOSTIC MODE 2 (DETAIL PAGE) #####")
+    items: List[Dict] = []
     
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
@@ -33,22 +116,36 @@ def parse_alamosa() -> List[Dict]:
         page.set_default_timeout(30000)
 
         try:
-            print(f"[alamosa] Navigating to detail page: {PORTAL_URL}")
+            print(f"[alamosa] Navigating to {PORTAL_URL}")
             page.goto(PORTAL_URL, wait_until="networkidle")
 
-            print("[alamosa] Page loaded. Dumping HTML content for detail page...")
-            html_content = page.content()
+            # Correct selectors for links as determined from diagnostic run
+            link_selector = "#ctl00_UpcomingMeetings a.list-link, #ctl00_RecentMeetings a.list-link, #ctl00_TodaysMeetings a.list-link"
+            page.wait_for_selector("#ctl00_RightSidebar", timeout=20000)
             
-            print("\n\n" + "="*20 + " ALAMOSA DETAIL PAGE HTML START " + "="*20 + "\n\n")
-            print(html_content)
-            print("\n\n" + "="*20 + " ALAMOSA DETAIL PAGE HTML END " + "="*20 + "\n\n")
+            meeting_links = page.locator(link_selector).all()
+            print(f"[alamosa] Found {len(meeting_links)} potential meeting links across all sections.")
+            
+            detail_urls = list(dict.fromkeys(
+                urljoin(page.url, link.get_attribute('href')) for link in meeting_links if link.get_attribute('href')
+            ))
+            
+            print(f"[alamosa] Found {len(detail_urls)} unique detail URLs to scrape.")
+
+            for url in detail_urls:
+                meeting_item = _parse_meeting_detail_page(page, url)
+                if meeting_item:
+                    items.append(meeting_item)
 
         except Exception as e:
-            print(f"[alamosa] A critical error occurred during diagnostic run: {e}")
-
+            print(f"[alamosa] A critical error occurred during scraping: {e}")
         finally:
             if browser.is_connected():
                 browser.close()
 
-    print("[alamosa] Diagnostic run complete. No items will be produced.")
-    return []
+    # Deduplicate by source URL
+    final_items = list({item['source']: item for item in items}.values())
+    sorted_items = sorted(final_items, key=lambda d: (d.get("date") or "9999-12-31", d.get("meeting_type") or ""))
+    
+    print(f"[alamosa] produced {len(sorted_items)} item(s)")
+    return sorted_items

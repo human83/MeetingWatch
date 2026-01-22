@@ -1,1529 +1,1655 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MeetingWatch — Demo Homepage</title>
-  <meta name="description" content="MeetingWatch demo homepage powered by live meetings.json (GitHub Pages)." />
-  <style>
-    :root{
-      --bg: #0b1220;
-      --panel: rgba(255,255,255,.06);
-      --panel2: rgba(255,255,255,.085);
-      --text: rgba(255,255,255,.92);
-      --muted: rgba(255,255,255,.72);
-      --faint: rgba(255,255,255,.56);
-      --line: rgba(255,255,255,.14);
-      --brand: #7dd3fc;     /* sky-300 */
-      --brand2:#a78bfa;     /* violet-400 */
-      --good: #34d399;      /* emerald-400 */
-      --warn: #fbbf24;      /* amber-400 */
-      --bad:  #fb7185;      /* rose-400 */
-      --shadow: 0 18px 60px rgba(0,0,0,.35);
-      --radius: 18px;
-      --radius2: 24px;
-      --maxw: 1200px;
-      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      --sans: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
-    }
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>MeetingWatch — National Demo</title>
+<meta name="description" content="National-scale MeetingWatch demo: live Colorado feed + mock US cities, entity tracking, voting patterns, sentiment, archives."/>
+<style>
+  :root{
+    --bg0:#070A11; --bg1:#0B1220;
+    --panel:rgba(255,255,255,.055); --panel2:rgba(255,255,255,.08);
+    --line:rgba(255,255,255,.14);
+    --text:rgba(255,255,255,.92); --muted:rgba(255,255,255,.70); --faint:rgba(255,255,255,.55);
+    --brand:#7dd3fc; --brand2:#a78bfa; --good:#34d399; --warn:#fbbf24; --bad:#fb7185;
+    --shadow: 0 18px 60px rgba(0,0,0,.38);
+    --r:18px; --r2:24px; --maxw:1260px;
+    --mono: ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;
+    --sans: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; font-family:var(--sans); color:var(--text);
+    background:
+      radial-gradient(1200px 700px at 20% 8%, rgba(125,211,252,.18), transparent 60%),
+      radial-gradient(900px 600px at 85% 18%, rgba(167,139,250,.16), transparent 55%),
+      radial-gradient(900px 650px at 50% 95%, rgba(52,211,153,.12), transparent 55%),
+      linear-gradient(180deg, var(--bg0), var(--bg1));
+    overflow-x:hidden;
+  }
+  a{color:inherit; text-decoration:none}
+  a:hover{text-decoration:underline; text-underline-offset:3px}
+  .container{width:min(var(--maxw), calc(100% - 40px)); margin:0 auto}
+  .hidden{display:none!important}
 
-    *{ box-sizing:border-box; }
-    html, body{ height:100%; }
-    body{
-      margin:0;
-      font-family: var(--sans);
-      color: var(--text);
-      background:
-        radial-gradient(1200px 700px at 20% 10%, rgba(125,211,252,.18), transparent 60%),
-        radial-gradient(900px 600px at 85% 20%, rgba(167,139,250,.16), transparent 55%),
-        radial-gradient(900px 650px at 50% 95%, rgba(52,211,153,.12), transparent 55%),
-        linear-gradient(180deg, #070b13, var(--bg));
-      overflow-x:hidden;
-    }
+  /* Topbar */
+  .topbar{position:sticky; top:0; z-index:50; backdrop-filter:blur(14px);
+    background:rgba(9,12,20,.68); border-bottom:1px solid var(--line)}
+  .topbar-inner{display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 0; flex-wrap:wrap}
+  .brand{display:flex; align-items:center; gap:12px; min-width:260px}
+  .logo{
+    width:34px; height:34px; border-radius:12px; flex:0 0 auto;
+    background:
+      radial-gradient(12px 12px at 30% 35%, rgba(255,255,255,.9), transparent 55%),
+      radial-gradient(30px 30px at 70% 70%, rgba(255,255,255,.2), transparent 60%),
+      linear-gradient(135deg, rgba(125,211,252,.95), rgba(167,139,250,.95));
+    border:1px solid rgba(255,255,255,.25);
+    box-shadow:0 10px 35px rgba(125,211,252,.12);
+  }
+  .brand h1{margin:0; font-size:14px; letter-spacing:.2px; line-height:1.1}
+  .brand .sub{margin-top:2px; font-size:12px; color:var(--muted)}
+  .rightbar{display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end}
+  .pill{
+    display:inline-flex; align-items:center; gap:8px;
+    padding:8px 10px; border-radius:999px; border:1px solid var(--line);
+    background:rgba(255,255,255,.05); color:var(--muted); font-size:12px; white-space:nowrap;
+  }
+  .dot{width:8px; height:8px; border-radius:999px; background:var(--warn); box-shadow:0 0 0 3px rgba(251,191,36,.14)}
+  .dot.good{background:var(--good); box-shadow:0 0 0 3px rgba(52,211,153,.14)}
+  .badge{font-family:var(--mono); font-size:11px; color:rgba(255,255,255,.82);
+    border:1px solid rgba(255,255,255,.18); background:rgba(255,255,255,.06);
+    padding:2px 8px; border-radius:999px; white-space:nowrap
+  }
+  .btn{
+    display:inline-flex; align-items:center; justify-content:center; gap:10px;
+    padding:10px 12px; border-radius:14px; border:1px solid var(--line);
+    background:rgba(255,255,255,.06); color:var(--text); font-size:13px;
+    cursor:pointer; user-select:none; transition:transform .08s ease, background .15s ease, border-color .15s ease;
+  }
+  .btn:hover{background:rgba(255,255,255,.09); border-color:rgba(255,255,255,.22); text-decoration:none}
+  .btn:active{transform:translateY(1px)}
+  .btn.primary{
+    border-color:rgba(125,211,252,.35);
+    background:linear-gradient(135deg, rgba(125,211,252,.18), rgba(167,139,250,.14));
+    box-shadow:0 16px 45px rgba(125,211,252,.10);
+  }
+  .btn.small{padding:8px 10px; font-size:12px; border-radius:12px}
 
-    a{ color: inherit; text-decoration: none; }
-    a:hover{ text-decoration: underline; text-underline-offset: 3px; }
-    .container{ width: min(var(--maxw), calc(100% - 40px)); margin: 0 auto; }
-    .row{ display:flex; gap:18px; }
-    .grid{ display:grid; gap:18px; }
-    .hidden{ display:none !important; }
+  /* Hero */
+  .hero{padding:22px 0 10px}
+  .hero-card{
+    border:1px solid var(--line); border-radius:var(--r2); box-shadow:var(--shadow);
+    background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.03));
+    overflow:hidden; position:relative;
+  }
+  .hero-card::before{
+    content:""; position:absolute; inset:-140px -120px auto auto;
+    width:380px; height:380px; border-radius:999px;
+    background:radial-gradient(circle at 40% 40%, rgba(125,211,252,.28), transparent 55%);
+    pointer-events:none;
+  }
+  .hero-card::after{
+    content:""; position:absolute; inset:auto auto -160px -160px;
+    width:420px; height:420px; border-radius:999px;
+    background:radial-gradient(circle at 50% 50%, rgba(167,139,250,.22), transparent 60%);
+    pointer-events:none;
+  }
+  .hero-inner{padding:22px 18px 16px; position:relative}
+  .kicker{
+    display:inline-flex; align-items:center; gap:10px;
+    font-size:12px; color:var(--muted); border:1px solid var(--line);
+    background:rgba(255,255,255,.04); padding:7px 10px; border-radius:999px; width:fit-content;
+  }
+  .spark{width:10px; height:10px; border-radius:2px; transform:rotate(18deg);
+    background:linear-gradient(135deg, var(--brand), var(--brand2)); box-shadow:0 8px 24px rgba(167,139,250,.18);
+  }
+  .hero h2{margin:12px 0 8px; font-size:clamp(22px,3.2vw,40px); line-height:1.08; letter-spacing:-.5px}
+  .hero p{margin:0 0 12px; max-width:92ch; color:var(--muted); font-size:14px; line-height:1.6}
+  .hero-actions{display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-top:8px}
 
-    /* Top bar */
-    .topbar{
-      position: sticky;
-      top:0;
-      z-index: 50;
-      backdrop-filter: blur(14px);
-      background: rgba(9, 12, 20, .68);
-      border-bottom: 1px solid var(--line);
-    }
-    .topbar-inner{
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      padding: 12px 0;
-      gap: 12px;
-    }
-    .brand{
-      display:flex;
-      align-items:center;
-      gap: 12px;
-      min-width: 220px;
-    }
-    .logo{
-      width: 34px; height: 34px;
-      border-radius: 12px;
-      background:
-        radial-gradient(12px 12px at 30% 35%, rgba(255,255,255,.9), transparent 55%),
-        radial-gradient(30px 30px at 70% 70%, rgba(255,255,255,.2), transparent 60%),
-        linear-gradient(135deg, rgba(125,211,252,.95), rgba(167,139,250,.95));
-      box-shadow: 0 10px 35px rgba(125,211,252,.12);
-      border: 1px solid rgba(255,255,255,.25);
-    }
-    .brand h1{
-      font-size: 14px;
-      margin:0;
-      letter-spacing:.2px;
-      line-height: 1.1;
-    }
-    .brand .sub{
-      font-size: 12px;
-      color: var(--muted);
-      margin-top: 2px;
-      letter-spacing:.15px;
-    }
-    .pillrow{
-      display:flex;
-      align-items:center;
-      flex-wrap:wrap;
-      gap: 10px;
-      justify-content:flex-end;
-    }
-    .pill{
-      display:inline-flex;
-      align-items:center;
-      gap: 8px;
-      padding: 8px 10px;
-      border-radius: 999px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.05);
-      color: var(--muted);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .dot{
-      width:8px; height:8px;
-      border-radius: 999px;
-      background: var(--warn);
-      box-shadow: 0 0 0 3px rgba(251,191,36,.14);
-      flex: 0 0 auto;
-    }
-    .dot.good{
-      background: var(--good);
-      box-shadow: 0 0 0 3px rgba(52,211,153,.14);
-    }
-    .btn{
-      display:inline-flex;
-      align-items:center;
-      justify-content:center;
-      gap: 10px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.06);
-      color: var(--text);
-      font-size: 13px;
-      cursor:pointer;
-      transition: transform .08s ease, background .15s ease, border-color .15s ease;
-      user-select:none;
-      text-decoration:none;
-    }
-    .btn:hover{
-      background: rgba(255,255,255,.09);
-      border-color: rgba(255,255,255,.22);
-      text-decoration:none;
-    }
-    .btn:active{ transform: translateY(1px); }
-    .btn.primary{
-      border-color: rgba(125,211,252,.35);
-      background: linear-gradient(135deg, rgba(125,211,252,.18), rgba(167,139,250,.14));
-      box-shadow: 0 16px 45px rgba(125,211,252,.10);
-    }
+  /* KPI strip */
+  .kpis{margin-top:14px; display:grid; grid-template-columns:repeat(12,1fr); gap:12px}
+  .kpi{
+    grid-column:span 3; border:1px solid var(--line); border-radius:var(--r);
+    background:rgba(255,255,255,.05); padding:12px; min-height:86px;
+  }
+  .kpi .label{color:var(--muted); font-size:12px; margin-bottom:8px; display:flex; justify-content:space-between; gap:10px}
+  .kpi .value{font-size:22px; letter-spacing:-.4px; margin:0}
+  .kpi .hint{margin-top:6px; font-size:12px; color:var(--faint); line-height:1.35}
+  @media (max-width:980px){.kpi{grid-column:span 6}}
+  @media (max-width:620px){.kpi{grid-column:span 12}}
 
-    /* Hero */
-    .hero{
-      padding: 26px 0 10px;
-    }
-    .hero .wrap{
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.03));
-      box-shadow: var(--shadow);
-      border-radius: var(--radius2);
-      overflow:hidden;
-      position: relative;
-    }
-    .hero .wrap::before{
-      content:"";
-      position:absolute;
-      inset:-140px -120px auto auto;
-      width: 380px; height: 380px;
-      border-radius: 999px;
-      background: radial-gradient(circle at 40% 40%, rgba(125,211,252,.28), transparent 55%);
-      filter: blur(0px);
-      pointer-events:none;
-    }
-    .hero .wrap::after{
-      content:"";
-      position:absolute;
-      inset:auto auto -160px -160px;
-      width: 420px; height: 420px;
-      border-radius: 999px;
-      background: radial-gradient(circle at 50% 50%, rgba(167,139,250,.22), transparent 60%);
-      pointer-events:none;
-    }
+  /* Main */
+  .main{padding:16px 0 54px}
+  .main-grid{display:grid; grid-template-columns:1.15fr .85fr; gap:18px; align-items:start}
+  @media (max-width:1040px){.main-grid{grid-template-columns:1fr}}
+  .panel{
+    border:1px solid var(--line); border-radius:var(--r2); background:rgba(255,255,255,.045);
+    box-shadow:var(--shadow); overflow:hidden;
+  }
+  .panel-head{
+    padding:14px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; justify-content:space-between; gap:12px;
+    background:linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.025));
+  }
+  .panel-head h3{margin:0; font-size:13px; letter-spacing:.2px; color:rgba(255,255,255,.88)}
+  .panel-head .meta{font-size:12px; color:var(--muted); display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+  .panel-body{padding:14px}
+  .hr{height:1px; background:rgba(255,255,255,.12); margin:16px 0}
+  .muted{color:var(--muted)}
+  .footnote{color:var(--faint); font-size:12px; line-height:1.45}
 
-    .hero-inner{
-      padding: 26px 22px 18px;
-    }
-    .kicker{
-      display:inline-flex;
-      align-items:center;
-      gap: 10px;
-      font-size: 12px;
-      color: var(--muted);
-      border: 1px solid var(--line);
-      background: rgba(255,255,255,.04);
-      padding: 7px 10px;
-      border-radius: 999px;
-      width: fit-content;
-    }
-    .spark{
-      width: 10px; height: 10px;
-      border-radius: 2px;
-      transform: rotate(18deg);
-      background: linear-gradient(135deg, var(--brand), var(--brand2));
-      box-shadow: 0 8px 24px rgba(167,139,250,.18);
-    }
-    .hero h2{
-      margin: 14px 0 10px;
-      font-size: clamp(24px, 3.6vw, 42px);
-      line-height: 1.08;
-      letter-spacing: -.5px;
-    }
-    .hero p{
-      margin: 0 0 16px;
-      max-width: 76ch;
-      color: var(--muted);
-      font-size: 14px;
-      line-height: 1.6;
-    }
-    .hero-actions{
-      display:flex;
-      flex-wrap:wrap;
-      gap: 10px;
-      align-items:center;
-      margin-top: 6px;
-    }
+  /* Controls */
+  .controls{display:grid; grid-template-columns:1.1fr 1fr 1fr 1fr; gap:10px; align-items:center}
+  @media (max-width:720px){.controls{grid-template-columns:1fr}}
+  .field{
+    border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.04);
+    border-radius:14px; padding:10px 12px; display:flex; align-items:center; gap:10px; min-height:42px;
+  }
+  .field label{color:var(--faint); font-size:12px; white-space:nowrap}
+  .field input[type="search"], .field select{
+    width:100%; border:0; outline:none; background:transparent; color:var(--text);
+    font-size:13px; font-family:inherit;
+  }
+  .field select{appearance:none}
+  .field option{color:#111}
+  .chips{display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-top:10px}
+  .chip{
+    border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.04);
+    padding:8px 10px; border-radius:999px; font-size:12px; color:var(--muted);
+    cursor:pointer; user-select:none;
+  }
+  .chip[aria-pressed="true"]{
+    border-color:rgba(125,211,252,.34);
+    background:linear-gradient(135deg, rgba(125,211,252,.14), rgba(167,139,250,.10));
+    color:rgba(255,255,255,.92);
+  }
 
-    /* Stats */
-    .stats{
-      margin-top: 16px;
-      display:grid;
-      grid-template-columns: repeat(12, 1fr);
-      gap: 14px;
-    }
-    .stat{
-      grid-column: span 3;
-      border: 1px solid var(--line);
-      border-radius: var(--radius);
-      background: rgba(255,255,255,.05);
-      padding: 12px 12px;
-    }
-    .stat .label{
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 8px;
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap: 10px;
-    }
-    .stat .value{
-      font-size: 22px;
-      letter-spacing: -.4px;
-      margin:0;
-    }
-    .stat .hint{
-      margin-top: 6px;
-      font-size: 12px;
-      color: var(--faint);
-      line-height: 1.35;
-    }
-    .badge{
-      font-family: var(--mono);
-      font-size: 11px;
-      color: rgba(255,255,255,.78);
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.06);
-      padding: 2px 8px;
-      border-radius: 999px;
-      white-space: nowrap;
-    }
+  /* Tile map */
+  .map-wrap{display:flex; gap:12px; align-items:stretch; flex-wrap:wrap}
+  .tilemap{
+    flex:1 1 520px; min-width:320px;
+    border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.03);
+    border-radius:var(--r2); padding:12px; overflow:hidden; position:relative;
+  }
+  .legend{display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:space-between; margin-bottom:10px}
+  .modes{display:flex; gap:10px; flex-wrap:wrap; align-items:center}
+  .mode{
+    padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.14);
+    background:rgba(255,255,255,.04); color:var(--muted); font-size:12px; cursor:pointer; user-select:none;
+  }
+  .mode[aria-pressed="true"]{
+    border-color:rgba(125,211,252,.34);
+    background:linear-gradient(135deg, rgba(125,211,252,.14), rgba(167,139,250,.10));
+    color:rgba(255,255,255,.92);
+  }
+  .gridmap{display:grid; grid-template-columns:repeat(12,1fr); gap:6px}
+  .st{
+    border-radius:12px; border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.035);
+    min-height:36px; display:flex; align-items:center; justify-content:center;
+    font-family:var(--mono); font-size:12px; color:rgba(255,255,255,.82);
+    cursor:pointer; user-select:none; position:relative;
+  }
+  .st:hover{background:rgba(255,255,255,.06)}
+  .st[data-empty="true"]{border-color:transparent; background:transparent; cursor:default}
+  .st[data-empty="true"]:hover{background:transparent}
+  .st.selected{
+    border-color:rgba(125,211,252,.38);
+    background:linear-gradient(135deg, rgba(125,211,252,.14), rgba(167,139,250,.10));
+    box-shadow:0 10px 40px rgba(125,211,252,.08);
+  }
+  .st .tt{
+    position:absolute; left:10px; top:calc(100% + 8px);
+    width:max-content; max-width:260px; padding:10px; border-radius:14px;
+    border:1px solid rgba(255,255,255,.16); background:rgba(10,12,20,.94);
+    box-shadow:var(--shadow); color:rgba(255,255,255,.9);
+    font-family:var(--sans); font-size:12px; line-height:1.35;
+    display:none; z-index:5;
+  }
+  .st:hover .tt{display:block}
+  .cov-0{opacity:.35}
+  .cov-1{box-shadow:inset 0 0 0 999px rgba(251,191,36,.08)}
+  .cov-2{box-shadow:inset 0 0 0 999px rgba(125,211,252,.10)}
+  .cov-3{box-shadow:inset 0 0 0 999px rgba(52,211,153,.10)}
+  .cov-4{box-shadow:inset 0 0 0 999px rgba(167,139,250,.10)}
 
-    /* Main layout */
-    .main{
-      padding: 18px 0 52px;
-    }
-    .main-grid{
-      display:grid;
-      grid-template-columns: 1.2fr .8fr;
-      gap: 18px;
-      align-items:start;
-    }
-    @media (max-width: 980px){
-      .main-grid{ grid-template-columns: 1fr; }
-      .stat{ grid-column: span 6; }
-    }
-    @media (max-width: 620px){
-      .stat{ grid-column: span 12; }
-    }
+  /* Meetings list */
+  .list{display:flex; flex-direction:column; gap:12px}
+  .card{
+    border:1px solid rgba(255,255,255,.14); border-radius:var(--r2);
+    background:rgba(255,255,255,.045); overflow:hidden;
+  }
+  .card-top{
+    padding:12px; border-bottom:1px solid rgba(255,255,255,.12);
+    display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+    background:rgba(255,255,255,.03);
+  }
+  .title{display:flex; flex-direction:column; gap:6px; min-width:0}
+  .line1{display:flex; flex-wrap:wrap; gap:8px; align-items:center; font-weight:650; font-size:14px}
+  .line2{display:flex; flex-wrap:wrap; gap:10px; align-items:center; color:var(--muted); font-size:12px}
+  .tag{
+    font-family:var(--mono); font-size:11px; border:1px solid rgba(255,255,255,.18);
+    background:rgba(255,255,255,.05); padding:2px 8px; border-radius:999px; color:rgba(255,255,255,.78);
+    white-space:nowrap;
+  }
+  .tag.good{border-color:rgba(52,211,153,.32); background:rgba(52,211,153,.10); color:rgba(236,253,245,.92)}
+  .tag.warn{border-color:rgba(251,191,36,.32); background:rgba(251,191,36,.10); color:rgba(255,251,235,.92)}
+  .tag.bad{border-color:rgba(251,113,133,.32); background:rgba(251,113,133,.10); color:rgba(255,241,242,.92)}
+  .actions{display:flex; gap:8px; align-items:center; flex-wrap:wrap; justify-content:flex-end}
+  .card-body{padding:12px; display:grid; grid-template-columns:1fr; gap:10px}
+  .summary{color:rgba(255,255,255,.86); font-size:13px; line-height:1.55}
+  .summary ul{margin:0; padding-left:18px}
+  .summary li{margin:6px 0; color:rgba(255,255,255,.84)}
 
-    .panel{
-      border: 1px solid var(--line);
-      border-radius: var(--radius2);
-      background: rgba(255,255,255,.045);
-      box-shadow: var(--shadow);
-      overflow:hidden;
-    }
-    .panel-head{
-      padding: 14px 14px;
-      border-bottom: 1px solid var(--line);
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap: 12px;
-      background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.025));
-    }
-    .panel-head h3{
-      margin:0;
-      font-size: 13px;
-      letter-spacing: .2px;
-      color: rgba(255,255,255,.88);
-    }
-    .panel-head .meta{
-      font-size: 12px;
-      color: var(--muted);
-      display:flex;
-      align-items:center;
-      gap: 10px;
-    }
-    .panel-body{
-      padding: 14px;
-    }
+  /* Analytics */
+  .two-up{display:grid; grid-template-columns:1fr 1fr; gap:12px}
+  @media (max-width:520px){.two-up{grid-template-columns:1fr}}
+  .mini-panel{
+    border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.04);
+    border-radius:var(--r2); overflow:hidden;
+  }
+  .mini-head{
+    padding:10px 12px; border-bottom:1px solid rgba(255,255,255,.12);
+    background:rgba(255,255,255,.03);
+    display:flex; align-items:center; justify-content:space-between; gap:10px;
+  }
+  .mini-head h4{margin:0; font-size:12.5px; letter-spacing:.2px}
+  .mini-body{padding:12px}
+  .chart{border:1px solid rgba(255,255,255,.14); background:rgba(255,255,255,.03); border-radius:14px; padding:10px; overflow:hidden}
+  .chart svg{width:100%; height:84px; display:block}
+  .pillbox{display:flex; gap:8px; flex-wrap:wrap; align-items:center}
+  .pill2{
+    padding:6px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.16);
+    background:rgba(255,255,255,.04); color:rgba(255,255,255,.82); font-size:12px;
+  }
+  .pill2 .tiny{color:var(--muted); font-size:11px; margin-left:6px}
 
-    /* Controls */
-    .controls{
-      display:grid;
-      grid-template-columns: 1.4fr 1fr 1fr 1fr;
-      gap: 10px;
-      align-items:center;
-    }
-    @media (max-width: 980px){
-      .controls{ grid-template-columns: 1fr 1fr; }
-    }
-    @media (max-width: 620px){
-      .controls{ grid-template-columns: 1fr; }
-    }
+  table{width:100%; border-collapse:collapse}
+  th,td{border-bottom:1px solid rgba(255,255,255,.10); padding:8px; font-size:12px; color:rgba(255,255,255,.86); text-align:left; vertical-align:top; white-space:nowrap}
+  th{color:var(--muted); font-weight:650; font-size:11.5px}
+  .vote{width:12px; height:12px; border-radius:4px; display:inline-block; margin-right:6px; border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.05)}
+  .vote.aye{background:rgba(52,211,153,.18); border-color:rgba(52,211,153,.32)}
+  .vote.nay{background:rgba(251,113,133,.18); border-color:rgba(251,113,133,.32)}
+  .vote.abs{background:rgba(251,191,36,.14); border-color:rgba(251,191,36,.30)}
 
-    .field{
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.04);
-      border-radius: 14px;
-      padding: 10px 12px;
-      display:flex;
-      align-items:center;
-      gap: 10px;
-      min-height: 42px;
-    }
-    .field label{
-      color: var(--faint);
-      font-size: 12px;
-      white-space: nowrap;
-    }
-    .field input[type="search"], .field select{
-      width: 100%;
-      border: 0;
-      outline: none;
-      background: transparent;
-      color: var(--text);
-      font-size: 13px;
-      font-family: inherit;
-    }
-    .field select{ appearance:none; }
-    .field option{ color:#111; }
-    .tog{
-      display:flex;
-      gap: 10px;
-      flex-wrap:wrap;
-      align-items:center;
-      margin-top: 10px;
-    }
-    .chip{
-      border: 1px solid rgba(255,255,255,.16);
-      background: rgba(255,255,255,.04);
-      padding: 8px 10px;
-      border-radius: 999px;
-      font-size: 12px;
-      color: var(--muted);
-      cursor:pointer;
-      user-select:none;
-    }
-    .chip[aria-pressed="true"]{
-      border-color: rgba(125,211,252,.34);
-      background: linear-gradient(135deg, rgba(125,211,252,.14), rgba(167,139,250,.10));
-      color: rgba(255,255,255,.92);
-    }
+  /* Modal */
+  .overlay{position:fixed; inset:0; background:rgba(0,0,0,.55); backdrop-filter:blur(6px);
+    display:none; z-index:100; padding:24px 14px; overflow:auto}
+  .overlay.open{display:block}
+  .modal{
+    width:min(980px, 100%); margin:0 auto; border-radius:26px;
+    border:1px solid rgba(255,255,255,.16); background:rgba(10,12,20,.92);
+    box-shadow:var(--shadow); overflow:hidden;
+  }
+  .modal-head{
+    padding:14px; border-bottom:1px solid rgba(255,255,255,.12);
+    display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+    background:rgba(255,255,255,.03);
+  }
+  .modal-title{display:flex; flex-direction:column; gap:4px}
+  .modal-title h3{margin:0; font-size:14px; letter-spacing:.2px}
+  .tabs{display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:12px}
+  .tab{
+    padding:8px 10px; border-radius:999px; border:1px solid rgba(255,255,255,.16);
+    background:rgba(255,255,255,.04); color:var(--muted); font-size:12px; cursor:pointer; user-select:none;
+  }
+  .tab[aria-selected="true"]{
+    border-color:rgba(125,211,252,.34);
+    background:linear-gradient(135deg, rgba(125,211,252,.14), rgba(167,139,250,.10));
+    color:rgba(255,255,255,.92);
+  }
 
-    /* Meetings list */
-    .list{
-      display:flex;
-      flex-direction:column;
-      gap: 12px;
-    }
-    .card{
-      border: 1px solid rgba(255,255,255,.14);
-      border-radius: var(--radius2);
-      background: rgba(255,255,255,.045);
-      overflow:hidden;
-    }
-    .card-top{
-      padding: 12px 12px;
-      border-bottom: 1px solid rgba(255,255,255,.12);
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap: 12px;
-      background: rgba(255,255,255,.03);
-    }
-    .title{
-      display:flex;
-      flex-direction:column;
-      gap: 6px;
-      min-width: 0;
-    }
-    .title .line1{
-      display:flex;
-      flex-wrap:wrap;
-      gap: 8px;
-      align-items:center;
-      font-weight: 650;
-      letter-spacing:.15px;
-      font-size: 14px;
-    }
-    .title .line2{
-      display:flex;
-      flex-wrap:wrap;
-      gap: 10px;
-      align-items:center;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .tag{
-      font-family: var(--mono);
-      font-size: 11px;
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.05);
-      padding: 2px 8px;
-      border-radius: 999px;
-      color: rgba(255,255,255,.78);
-      white-space: nowrap;
-    }
-    .tag.good{ border-color: rgba(52,211,153,.32); background: rgba(52,211,153,.10); color: rgba(236,253,245,.92); }
-    .tag.warn{ border-color: rgba(251,191,36,.32); background: rgba(251,191,36,.10); color: rgba(255,251,235,.92); }
-    .tag.bad{ border-color: rgba(251,113,133,.32); background: rgba(251,113,133,.10); color: rgba(255,241,242,.92); }
+  /* Skeleton */
+  .skeleton{
+    border:1px solid rgba(255,255,255,.14); border-radius:var(--r2);
+    background:rgba(255,255,255,.04); padding:12px; min-height:70px; position:relative; overflow:hidden;
+  }
+  .skeleton::after{
+    content:""; position:absolute; inset:0; transform:translateX(-60%);
+    background:linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
+    animation:shimmer 1.3s infinite;
+  }
+  @keyframes shimmer{0%{transform:translateX(-60%)}100%{transform:translateX(60%)}}
 
-    .actions{
-      display:flex;
-      gap: 8px;
-      align-items:center;
-      flex-wrap:wrap;
-      justify-content:flex-end;
-    }
-    .mini{
-      padding: 8px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-    }
-    .card-body{
-      padding: 12px 12px 12px;
-      display:grid;
-      grid-template-columns: 1fr;
-      gap: 10px;
-    }
-    .summary{
-      color: rgba(255,255,255,.86);
-      font-size: 13px;
-      line-height: 1.55;
-    }
-    .summary ul{
-      margin: 0;
-      padding-left: 18px;
-    }
-    .summary li{ margin: 6px 0; color: rgba(255,255,255,.84); }
-    .muted{ color: var(--muted); }
-    .footnote{ color: var(--faint); font-size: 12px; line-height: 1.45; }
-
-    /* Right column: bars + roadmap + pricing */
-    .bars{
-      display:flex;
-      flex-direction:column;
-      gap: 10px;
-    }
-    .barrow{
-      display:grid;
-      grid-template-columns: 1fr auto;
-      gap: 10px;
-      align-items:center;
-    }
-    .barrow .name{
-      color: rgba(255,255,255,.86);
-      font-size: 12px;
-      display:flex;
-      align-items:center;
-      justify-content:space-between;
-      gap: 10px;
-    }
-    .barwrap{
-      grid-column: 1 / -1;
-      height: 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.04);
-      overflow:hidden;
-    }
-    .bar{
-      height:100%;
-      width: 0%;
-      border-radius: 999px;
-      background: linear-gradient(90deg, rgba(125,211,252,.85), rgba(167,139,250,.85));
-    }
-
-    .timeline{
-      display:flex;
-      flex-direction:column;
-      gap: 12px;
-    }
-    .milestone{
-      border: 1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.04);
-      border-radius: var(--radius2);
-      padding: 12px;
-      position:relative;
-      overflow:hidden;
-    }
-    .milestone::before{
-      content:"";
-      position:absolute;
-      inset: 0 auto 0 0;
-      width: 4px;
-      background: linear-gradient(180deg, rgba(125,211,252,.9), rgba(167,139,250,.75));
-    }
-    .milestone h4{
-      margin:0 0 6px 0;
-      font-size: 13px;
-      letter-spacing:.2px;
-    }
-    .milestone .when{
-      color: var(--muted);
-      font-size: 12px;
-      margin-bottom: 8px;
-    }
-    .milestone ul{
-      margin: 0;
-      padding-left: 18px;
-      color: rgba(255,255,255,.84);
-      font-size: 12.5px;
-      line-height: 1.45;
-    }
-    .milestone li{ margin: 5px 0; }
-
-    .pricing{
-      display:grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-    }
-    .tier{
-      border: 1px solid rgba(255,255,255,.14);
-      background: rgba(255,255,255,.04);
-      border-radius: var(--radius2);
-      overflow:hidden;
-    }
-    .tier-head{
-      padding: 12px;
-      border-bottom: 1px solid rgba(255,255,255,.12);
-      display:flex;
-      align-items:flex-start;
-      justify-content:space-between;
-      gap: 10px;
-      background: rgba(255,255,255,.03);
-    }
-    .tier h4{ margin:0; font-size: 13px; }
-    .tier .price{
-      font-family: var(--mono);
-      font-size: 12px;
-      color: rgba(255,255,255,.85);
-      border: 1px solid rgba(255,255,255,.18);
-      background: rgba(255,255,255,.05);
-      border-radius: 999px;
-      padding: 4px 10px;
-      white-space: nowrap;
-    }
-    .tier-body{ padding: 12px; }
-    .tier ul{
-      margin: 0;
-      padding-left: 18px;
-      color: rgba(255,255,255,.84);
-      font-size: 12.5px;
-      line-height: 1.45;
-    }
-    .tier li{ margin: 5px 0; }
-    .tier .aud{
-      color: var(--muted);
-      font-size: 12px;
-      margin-top: 8px;
-      line-height: 1.35;
-    }
-
-    .footer{
-      padding: 18px 0 34px;
-      color: var(--faint);
-      font-size: 12px;
-      text-align:center;
-    }
-    .hr{
-      height:1px;
-      background: rgba(255,255,255,.12);
-      margin: 18px 0;
-    }
-
-    /* Loading skeleton */
-    .skeleton{
-      border: 1px solid rgba(255,255,255,.14);
-      border-radius: var(--radius2);
-      background: rgba(255,255,255,.04);
-      padding: 12px;
-      overflow:hidden;
-      position:relative;
-      min-height: 70px;
-    }
-    .skeleton::after{
-      content:"";
-      position:absolute;
-      inset:0;
-      transform: translateX(-60%);
-      background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent);
-      animation: shimmer 1.3s infinite;
-    }
-    @keyframes shimmer{
-      0%{ transform: translateX(-60%); }
-      100%{ transform: translateX(60%); }
-    }
-  </style>
+  .footer{padding:18px 0 34px; color:var(--faint); font-size:12px; text-align:center}
+</style>
 </head>
-
 <body>
-  <header class="topbar">
-    <div class="container topbar-inner">
-      <div class="brand">
-        <div class="logo" aria-hidden="true"></div>
-        <div>
-          <h1>MeetingWatch <span class="muted">• Demo</span></h1>
-          <div class="sub">Live agenda aggregation + AI summaries</div>
-        </div>
-      </div>
-
-      <div class="pillrow">
-        <div class="pill" title="Data freshness from meetings.json">
-          <span id="liveDot" class="dot"></span>
-          <span>Live data</span>
-          <span id="lastChecked" class="badge">Loading…</span>
-        </div>
-        <a class="btn mini" href="https://human83.github.io/MeetingWatch/" title="Current production homepage">Current site</a>
-        <a class="btn mini" href="https://human83.github.io/MeetingWatch/data/meetings.json" title="Raw data feed (meetings.json)">meetings.json</a>
-        <a class="btn primary mini" href="#meetings">Browse meetings</a>
+<header class="topbar">
+  <div class="container topbar-inner">
+    <div class="brand">
+      <div class="logo" aria-hidden="true"></div>
+      <div>
+        <h1>MeetingWatch <span class="muted">• National Demo</span></h1>
+        <div class="sub">Meetings • agendas • transcripts • analytics • alerts</div>
       </div>
     </div>
-  </header>
 
-  <section class="hero">
-    <div class="container">
-      <div class="wrap">
-        <div class="hero-inner">
-          <div class="kicker"><span class="spark"></span>Product vision mockup, powered by your real pipeline</div>
-          <h2>Transparency you can search, alert on, and act on.</h2>
-          <p>
-            This demo pulls the <span class="badge">live</span> MeetingWatch data feed and renders it like a future product:
-            dashboards, filters, alerts, and tiered plans — without changing your existing site.
-          </p>
-          <div class="hero-actions">
-            <a class="btn primary" href="#meetings">See upcoming meetings</a>
-            <a class="btn" href="#vision">See roadmap + monetization</a>
-            <button class="btn" id="btnRefresh" type="button" title="Re-fetch meetings.json">Refresh data</button>
+    <div class="rightbar">
+      <div class="pill" title="Live feed status (Colorado)">
+        <span id="liveDot" class="dot"></span>
+        <span>Colorado feed</span>
+        <span id="lastChecked" class="badge">Loading…</span>
+      </div>
+      <div class="pill" title="This demo blends live Colorado meetings with mock national coverage.">
+        <span class="badge">LIVE+DEMO</span>
+        <span id="modeNote">Colorado selected</span>
+      </div>
+      <a class="btn small" href="https://human83.github.io/MeetingWatch/" title="Current production homepage">Current site</a>
+      <a class="btn small" href="https://human83.github.io/MeetingWatch/data/meetings.json" title="Raw Colorado feed (meetings.json)">meetings.json</a>
+      <button class="btn primary small" id="btnRefresh" type="button" title="Refresh live feed">Refresh</button>
+    </div>
+  </div>
+</header>
+
+<section class="hero">
+  <div class="container">
+    <div class="hero-card">
+      <div class="hero-inner">
+        <div class="kicker"><span class="spark"></span>Product vision demo powered by your real pipeline</div>
+        <h2>Monitor any U.S. city — and understand what’s coming next.</h2>
+        <p>
+          MeetingWatch turns agendas and transcripts into searchable briefs, entity tracking, voting patterns, sentiment trends,
+          and historical archives. This single-file demo uses your <span class="badge">live Colorado feed</span> by default, and
+          simulates national expansion across major U.S. cities.
+        </p>
+        <div class="hero-actions">
+          <button class="btn primary" id="jumpMeetings" type="button">Browse meetings</button>
+          <button class="btn" id="jumpAnalytics" type="button">Explore analytics</button>
+          <button class="btn" id="btnCreateAlert" type="button">Create alert</button>
+        </div>
+
+        <div class="kpis" aria-label="National summary KPIs (demo)">
+          <div class="kpi" title="Demo KPI: national coverage">
+            <div class="label"><span>Cities covered</span><span class="badge">Demo</span></div>
+            <p class="value" id="kpiCities">—</p>
+            <div class="hint">Major metros + growing long tail</div>
           </div>
-
-          <div class="stats" aria-label="Live summary stats">
-            <div class="stat">
-              <div class="label"><span>Upcoming meetings</span><span class="badge" id="statRange">All</span></div>
-              <p class="value" id="statMeetings">—</p>
-              <div class="hint" id="statMeetingsHint">Loading…</div>
-            </div>
-            <div class="stat">
-              <div class="label"><span>Cities covered</span><span class="badge" id="statCitiesBadge">—</span></div>
-              <p class="value" id="statCities">—</p>
-              <div class="hint">Distinct jurisdictions in this feed</div>
-            </div>
-            <div class="stat">
-              <div class="label"><span>Agendas found</span><span class="badge" id="statAgendaBadge">—</span></div>
-              <p class="value" id="statAgendas">—</p>
-              <div class="hint">Items with an agenda URL in the feed</div>
-            </div>
-            <div class="stat">
-              <div class="label"><span>Next meeting</span><span class="badge" id="statNextBadge">Soonest</span></div>
-              <p class="value" id="statNext">—</p>
-              <div class="hint" id="statNextHint">—</div>
-            </div>
+          <div class="kpi" title="Demo KPI: national volume">
+            <div class="label"><span>Meetings indexed (30d)</span><span class="badge">Demo</span></div>
+            <p class="value" id="kpiMeetings30">—</p>
+            <div class="hint">Agendas • minutes • transcripts</div>
+          </div>
+          <div class="kpi" title="Demo KPI: national entities">
+            <div class="label"><span>Entities tracked</span><span class="badge">Demo</span></div>
+            <p class="value" id="kpiEntities">—</p>
+            <div class="hint">People • orgs • ordinances • projects</div>
+          </div>
+          <div class="kpi" title="Live KPI: Colorado status">
+            <div class="label"><span>Colorado (live)</span><span class="badge" id="kpiCoBadge">Live</span></div>
+            <p class="value" id="kpiCoCount">—</p>
+            <div class="hint" id="kpiCoHint">Loading…</div>
           </div>
         </div>
+
       </div>
     </div>
-  </section>
+  </div>
+</section>
 
-  <main class="main">
-    <div class="container main-grid">
-      <!-- LEFT -->
-      <section id="meetings" class="panel">
-        <div class="panel-head">
-          <h3>Upcoming meetings</h3>
-          <div class="meta">
-            <span class="badge" id="resultsCount">— results</span>
-            <span class="badge" id="citiesCount">— cities</span>
-          </div>
+<main class="main">
+  <div class="container main-grid">
+    <!-- LEFT -->
+    <section class="panel" id="meetingsPanel">
+      <div class="panel-head">
+        <h3>Coverage map + meetings feed</h3>
+        <div class="meta">
+          <span class="badge" id="selectedStateBadge">State: CO</span>
+          <span class="badge" id="resultsBadge">— results</span>
+          <span class="badge" id="citiesBadge">— cities</span>
         </div>
-
-        <div class="panel-body">
-          <div class="controls" aria-label="Filters">
-            <div class="field">
-              <label for="q">Search</label>
-              <input id="q" type="search" placeholder="Try: zoning, annexation, budget, ordinance…" autocomplete="off" />
+      </div>
+      <div class="panel-body">
+        <div class="map-wrap">
+          <div class="tilemap" aria-label="US coverage map (tile view)">
+            <div class="legend">
+              <div class="modes" aria-label="Map overlay mode">
+                <span class="mode" role="button" tabindex="0" aria-pressed="true" data-mapmode="coverage" title="Coverage intensity by state">Coverage</span>
+                <span class="mode" role="button" tabindex="0" aria-pressed="false" data-mapmode="topics" title="Demo: heat by topic velocity in the next 14 days">Hot topics</span>
+                <span class="mode" role="button" tabindex="0" aria-pressed="false" data-mapmode="sentiment" title="Demo: sentiment index from transcripts">Sentiment</span>
+              </div>
+              <span class="badge" title="Click a state to switch the feed and analytics. Colorado uses live data.">Click a state</span>
             </div>
-            <div class="field">
-              <label for="city">City</label>
-              <select id="city">
-                <option value="">All</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="source">Source</label>
-              <select id="source">
-                <option value="">All</option>
-              </select>
-            </div>
-            <div class="field">
-              <label for="sort">Sort</label>
-              <select id="sort">
-                <option value="date_asc">Soonest</option>
-                <option value="date_desc">Latest</option>
-                <option value="city_asc">City (A→Z)</option>
-              </select>
+            <div class="gridmap" id="gridmap"></div>
+            <div class="footnote" style="margin-top:10px;">
+              Hover a state for a quick preview. Colorado pulls <span class="badge">live</span> meetings.
             </div>
           </div>
 
-          <div class="tog" aria-label="Quick filters">
-            <button class="chip" id="chipAll" aria-pressed="true" type="button" data-range="all">All</button>
-            <button class="chip" id="chip7" aria-pressed="false" type="button" data-range="7">Next 7 days</button>
-            <button class="chip" id="chip30" aria-pressed="false" type="button" data-range="30">Next 30 days</button>
-            <button class="chip" id="chipAgenda" aria-pressed="false" type="button" data-flag="agenda">Only with agenda</button>
-            <button class="chip" id="chipSummaries" aria-pressed="false" type="button" data-flag="summary">Only with summary</button>
-            <button class="chip" id="chipReset" aria-pressed="false" type="button" title="Reset all filters">Reset</button>
-          </div>
-
-          <div class="hr"></div>
-
-          <div id="list" class="list" aria-live="polite">
-            <div class="skeleton"></div>
-            <div class="skeleton"></div>
-            <div class="skeleton"></div>
-          </div>
-
-          <div id="empty" class="hidden" style="margin-top:12px;">
-            <div class="card">
-              <div class="card-body">
-                <div class="summary">
-                  <strong>No matches.</strong>
-                  <div class="muted" style="margin-top:6px;">
-                    Try clearing a filter, or broaden your search.
-                  </div>
-                </div>
+          <div style="flex:1 1 320px; min-width: 280px;">
+            <div class="controls" aria-label="Feed controls">
+              <div class="field">
+                <label for="q">Search</label>
+                <input id="q" type="search" placeholder="Try: zoning, ordinance, budget, police…" autocomplete="off"/>
+              </div>
+              <div class="field">
+                <label for="stateSel">State</label>
+                <select id="stateSel" title="Choose a state (Colorado uses live data)"></select>
+              </div>
+              <div class="field">
+                <label for="citySel">City</label>
+                <select id="citySel"></select>
+              </div>
+              <div class="field">
+                <label for="sortSel">Sort</label>
+                <select id="sortSel">
+                  <option value="date_asc">Soonest</option>
+                  <option value="date_desc">Latest</option>
+                  <option value="city_asc">City (A→Z)</option>
+                </select>
               </div>
             </div>
-          </div>
 
-          <div id="error" class="hidden" style="margin-top:12px;">
-            <div class="card">
-              <div class="card-body">
-                <div class="summary">
-                  <strong>Couldn’t load the live feed.</strong>
-                  <div class="muted" style="margin-top:6px;">
-                    If you opened this file directly (file://), your browser may block fetch().
-                    Host it on GitHub Pages (or run a local server) and reload.
-                  </div>
+            <div class="chips" aria-label="Quick filters">
+              <button class="chip" type="button" aria-pressed="true" data-range="7" id="chip7">Next 7 days</button>
+              <button class="chip" type="button" aria-pressed="false" data-range="30" id="chip30">Next 30 days</button>
+              <button class="chip" type="button" aria-pressed="false" data-range="all" id="chipAll">All</button>
+              <button class="chip" type="button" aria-pressed="false" data-flag="agenda" id="chipAgenda">Agenda only</button>
+              <button class="chip" type="button" aria-pressed="false" data-flag="transcript" id="chipTranscript" title="Demo: show only meetings with transcripts">Transcript only</button>
+              <button class="chip" type="button" aria-pressed="false" data-flag="votes" id="chipVotes" title="Demo: show only meetings with vote records">Votes only</button>
+              <button class="chip" type="button" aria-pressed="false" id="chipReset">Reset</button>
+            </div>
+
+            <div class="hr"></div>
+
+            <div id="feed" class="list" aria-live="polite">
+              <div class="skeleton"></div>
+              <div class="skeleton"></div>
+              <div class="skeleton"></div>
+            </div>
+
+            <div id="empty" class="hidden" style="margin-top:12px;">
+              <div class="card"><div class="card-body">
+                <div class="summary"><strong>No matches.</strong>
+                  <div class="muted" style="margin-top:6px;">Clear a filter or broaden your search.</div>
+                </div>
+              </div></div>
+            </div>
+
+            <div id="error" class="hidden" style="margin-top:12px;">
+              <div class="card"><div class="card-body">
+                <div class="summary"><strong>Couldn’t load the live Colorado feed.</strong>
+                  <div class="muted" style="margin-top:6px;">This demo still works using national mock data.</div>
                   <div class="footnote" id="errorMsg" style="margin-top:10px;"></div>
                 </div>
-              </div>
+              </div></div>
             </div>
-          </div>
 
-          <div class="hr"></div>
-          <div class="footnote">
-            Demo notes: This is a <strong>single-file</strong> page that fetches live data from
-            <span class="badge">/data/meetings.json</span>. Some sources may not provide an agenda link yet —
-            in those cases the “Details” link points to the source’s meeting files page (when available).
+            <div class="hr"></div>
+            <div class="footnote"><span class="badge">LIVE</span> cards appear when Colorado is selected. Other states are a realistic national rollout.</div>
           </div>
         </div>
-      </section>
+      </div>
+    </section>
 
-      <!-- RIGHT -->
-      <aside class="grid" style="gap:18px;">
-        <section class="panel">
-          <div class="panel-head">
-            <h3>Coverage snapshot</h3>
-            <div class="meta"><span class="badge">By city</span></div>
-          </div>
-          <div class="panel-body">
-            <div class="bars" id="barsCities">
-              <div class="skeleton"></div>
-              <div class="skeleton"></div>
+    <!-- RIGHT -->
+    <aside class="panel" id="analyticsPanel">
+      <div class="panel-head">
+        <h3>Analytics workspace</h3>
+        <div class="meta">
+          <span class="badge" id="analyticsScope">Scope: Colorado</span>
+          <span class="badge" title="Demo: modules can be customized per user/team">Customizable</span>
+        </div>
+      </div>
+      <div class="panel-body">
+
+        <div class="two-up">
+          <div class="mini-panel">
+            <div class="mini-head">
+              <h4>Entity Tracker</h4>
+              <span class="badge" title="Track people/orgs/topics across agendas + transcripts">Entities</span>
             </div>
+            <div class="mini-body">
+              <div class="field" style="margin-bottom:10px;">
+                <label for="entitySearch">Entity</label>
+                <input id="entitySearch" type="search" placeholder="Try: Airbnb, Ordinance 23-117, I-25…" autocomplete="off"/>
+              </div>
+              <div class="pillbox" id="entityChips"></div>
+              <div class="hr"></div>
+              <div class="chart" title="Demo: mentions over time (last 12 weeks)">
+                <svg viewBox="0 0 300 84" preserveAspectRatio="none">
+                  <polyline id="entityLine" fill="none" stroke="rgba(125,211,252,.9)" stroke-width="2" points=""></polyline>
+                  <line x1="0" y1="80" x2="300" y2="80" stroke="rgba(255,255,255,.12)"/>
+                </svg>
+              </div>
+              <div class="footnote" style="margin-top:10px;">Click an entity chip to update the trend. Alerts can notify you when it appears again.</div>
+            </div>
+          </div>
 
+          <div class="mini-panel">
+            <div class="mini-head">
+              <h4>Transcript sentiment</h4>
+              <span class="badge" title="Demo: tone scoring for discussion + public comment">Sentiment</span>
+            </div>
+            <div class="mini-body">
+              <div class="field" style="margin-bottom:10px;">
+                <label for="sentimentSource">Source</label>
+                <select id="sentimentSource">
+                  <option value="council">Council discussion</option>
+                  <option value="public">Public comment</option>
+                  <option value="staff">Staff presentation</option>
+                </select>
+              </div>
+              <div class="chart" title="Demo: sentiment index (higher = more positive tone)">
+                <svg viewBox="0 0 300 84" preserveAspectRatio="none">
+                  <polyline id="sentLine" fill="none" stroke="rgba(52,211,153,.9)" stroke-width="2" points=""></polyline>
+                  <line x1="0" y1="80" x2="300" y2="80" stroke="rgba(255,255,255,.12)"/>
+                </svg>
+              </div>
+              <div class="pillbox" style="margin-top:10px;">
+                <span class="pill2" title="Demo: key driver for tone and attention">Top driver <span class="tiny" id="sentDriver">—</span></span>
+                <span class="pill2" title="Demo: volatility of tone">Volatility <span class="tiny" id="sentVol">—</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="mini-panel">
+          <div class="mini-head">
+            <h4>Voting patterns</h4>
+            <div class="meta" style="display:flex; gap:8px; align-items:center;">
+              <span class="badge" title="Demo: roll-call parsing and clustering">Roll-call</span>
+              <select id="voteCitySel" style="border:1px solid rgba(255,255,255,.16); background:rgba(255,255,255,.04); color:rgba(255,255,255,.86); border-radius:12px; padding:6px 8px; font-size:12px;"></select>
+            </div>
+          </div>
+          <div class="mini-body">
+            <table id="voteTable" aria-label="Voting pattern grid (demo)"></table>
+            <div class="footnote" style="margin-top:10px;">Demo clusters: housing, fiscal, public safety, transportation. Hover values for context.</div>
+          </div>
+        </div>
+
+        <div class="hr"></div>
+
+        <div class="mini-panel">
+          <div class="mini-head">
+            <h4>Historical archive</h4>
+            <span class="badge" title="Search back through agendas/minutes/transcripts">Archive</span>
+          </div>
+          <div class="mini-body">
+            <div class="field">
+              <label for="archiveSearch">Search</label>
+              <input id="archiveSearch" type="search" placeholder="Try: zoning ordinance 2023, annexation, bond…" autocomplete="off"/>
+            </div>
             <div class="hr"></div>
+            <div id="archiveResults" class="list"></div>
+            <div class="footnote" style="margin-top:10px;">Archive results are demo data (unless Colorado meeting links exist in your feed).</div>
+          </div>
+        </div>
 
-            <div class="panel-head" style="padding:0 0 10px;border:0;background:transparent;">
-              <h3 style="padding:0;margin:0;">Sources</h3>
-              <div class="meta"><span class="badge">By provider</span></div>
+      </div>
+    </aside>
+
+  </div>
+</main>
+
+<footer class="footer">
+  <div class="container">
+    <div class="hr"></div>
+    Single-file demo • <span class="badge">demo.html</span> • Live feed: <a href="https://human83.github.io/MeetingWatch/data/meetings.json">MeetingWatch/data/meetings.json</a>
+    <div style="margin-top:8px;">Publishing tip: copy <span class="badge">demo.html</span> into <span class="badge">_site/</span> in your workflow before deploy.</div>
+  </div>
+</footer>
+
+<!-- Modal -->
+<div class="overlay" id="overlay" role="dialog" aria-modal="true" aria-label="Meeting brief">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">
+        <h3 id="modalTitle">Meeting brief</h3>
+        <div class="muted" id="modalSub">—</div>
+      </div>
+      <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap; justify-content:flex-end;">
+        <a class="btn small" id="modalAgendaBtn" href="#" target="_blank" rel="noopener">Agenda</a>
+        <button class="btn small" id="modalClose" type="button">Close</button>
+      </div>
+    </div>
+    <div style="padding:14px;">
+      <div class="tabs" role="tablist" aria-label="Brief tabs">
+        <div class="tab" role="tab" tabindex="0" aria-selected="true" data-tab="brief">Brief</div>
+        <div class="tab" role="tab" tabindex="0" aria-selected="false" data-tab="entities">Entities</div>
+        <div class="tab" role="tab" tabindex="0" aria-selected="false" data-tab="votes">Votes</div>
+        <div class="tab" role="tab" tabindex="0" aria-selected="false" data-tab="archive">Archive</div>
+      </div>
+      <div id="tab_brief"></div>
+      <div id="tab_entities" class="hidden"></div>
+      <div id="tab_votes" class="hidden"></div>
+      <div id="tab_archive" class="hidden"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(()=>{ "use strict";
+  const FEED_URL = "https://human83.github.io/MeetingWatch/data/meetings.json";
+  const $ = (id)=>document.getElementById(id);
+  const $$ = (sel, root=document)=>Array.from(root.querySelectorAll(sel));
+  const esc = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+  const liveDot = $("liveDot"), lastChecked = $("lastChecked"), modeNote = $("modeNote");
+  const kpiCities = $("kpiCities"), kpiMeetings30 = $("kpiMeetings30"), kpiEntities = $("kpiEntities");
+  const kpiCoCount = $("kpiCoCount"), kpiCoHint = $("kpiCoHint");
+  const selectedStateBadge = $("selectedStateBadge"), resultsBadge = $("resultsBadge"), citiesBadge = $("citiesBadge"), analyticsScope = $("analyticsScope");
+  const q = $("q"), stateSel = $("stateSel"), citySel = $("citySel"), sortSel = $("sortSel");
+  const chip7 = $("chip7"), chip30 = $("chip30"), chipAll = $("chipAll"), chipAgenda = $("chipAgenda"), chipTranscript = $("chipTranscript"), chipVotes = $("chipVotes"), chipReset = $("chipReset");
+  const feed = $("feed"), empty = $("empty"), error = $("error"), errorMsg = $("errorMsg");
+  const gridmap = $("gridmap");
+  const entitySearch = $("entitySearch"), entityChips = $("entityChips"), entityLine = $("entityLine");
+  const sentimentSource = $("sentimentSource"), sentLine = $("sentLine"), sentDriver = $("sentDriver"), sentVol = $("sentVol");
+  const voteCitySel = $("voteCitySel"), voteTable = $("voteTable");
+  const archiveSearch = $("archiveSearch"), archiveResults = $("archiveResults");
+  const btnRefresh = $("btnRefresh"), jumpMeetings = $("jumpMeetings"), jumpAnalytics = $("jumpAnalytics"), btnCreateAlert = $("btnCreateAlert");
+  const overlay = $("overlay"), modalTitle = $("modalTitle"), modalSub = $("modalSub"), modalAgendaBtn = $("modalAgendaBtn"), modalClose = $("modalClose");
+  const tabBrief = $("tab_brief"), tabEntities = $("tab_entities"), tabVotes = $("tab_votes"), tabArchive = $("tab_archive");
+
+  let liveCO = { last_checked_mt:"", meetings:[] };
+  let mock = null;
+  let selectedState = "CO";
+  let selectedCity = "";
+  let mapMode = "coverage";
+  let filters = { q:"", sort:"date_asc", rangeDays:"7", onlyAgenda:false, onlyTranscript:false, onlyVotes:false };
+
+  const STATES = [
+    ["AL","Alabama"],["AK","Alaska"],["AZ","Arizona"],["AR","Arkansas"],["CA","California"],["CO","Colorado"],
+    ["CT","Connecticut"],["DE","Delaware"],["FL","Florida"],["GA","Georgia"],["HI","Hawaii"],["ID","Idaho"],
+    ["IL","Illinois"],["IN","Indiana"],["IA","Iowa"],["KS","Kansas"],["KY","Kentucky"],["LA","Louisiana"],
+    ["ME","Maine"],["MD","Maryland"],["MA","Massachusetts"],["MI","Michigan"],["MN","Minnesota"],["MS","Mississippi"],
+    ["MO","Missouri"],["MT","Montana"],["NE","Nebraska"],["NV","Nevada"],["NH","New Hampshire"],["NJ","New Jersey"],
+    ["NM","New Mexico"],["NY","New York"],["NC","North Carolina"],["ND","North Dakota"],["OH","Ohio"],["OK","Oklahoma"],
+    ["OR","Oregon"],["PA","Pennsylvania"],["RI","Rhode Island"],["SC","South Carolina"],["SD","South Dakota"],["TN","Tennessee"],
+    ["TX","Texas"],["UT","Utah"],["VT","Vermont"],["VA","Virginia"],["WA","Washington"],["WV","West Virginia"],
+    ["WI","Wisconsin"],["WY","Wyoming"],["DC","District of Columbia"]
+  ];
+  const MAJOR_CITIES = [
+    ["NY","New York","NYC Council"],["CA","Los Angeles","City Council"],["IL","Chicago","City Council"],["TX","Houston","City Council"],
+    ["AZ","Phoenix","City Council"],["PA","Philadelphia","City Council"],["TX","San Antonio","City Council"],["CA","San Diego","City Council"],
+    ["TX","Dallas","City Council"],["CA","San Jose","City Council"],["TX","Austin","City Council"],["FL","Miami","City Commission"],
+    ["WA","Seattle","City Council"],["MA","Boston","City Council"],["DC","Washington","Council of DC"],["OR","Portland","City Council"],
+    ["CO","Denver","City Council"],["CO","Colorado Springs","City Council"],["CO","Boulder","City Council"],["CO","Pueblo","City Council"],
+    ["CO","Salida","City Council"],["NV","Las Vegas","City Council"],["GA","Atlanta","City Council"],["MN","Minneapolis","City Council"]
+  ];
+  const TOPICS = [
+    ["Housing & Zoning", ["zoning","ADU","density","rezoning","short-term rental","affordable housing"]],
+    ["Budget & Tax", ["budget","bond","tax rate","capital plan","appropriation","audit"]],
+    ["Public Safety", ["police","fire","EMS","safety","body cameras","crime"]],
+    ["Transportation", ["transit","bike lanes","I-25","traffic","parking","Vision Zero"]],
+    ["Climate & Utilities", ["water","drought","grid","solar","waste","resilience"]],
+    ["Civic Governance", ["appointments","ethics","rules","charter","procurement","transparency"]]
+  ];
+  const ENTITY_SEEDS = [
+    {name:"Airbnb", type:"Organization"},
+    {name:"I-25 Expansion", type:"Project"},
+    {name:"Ordinance 23-117", type:"Ordinance"},
+    {name:"Neighborhood Coalition", type:"Organization"},
+    {name:"Police Union", type:"Organization"},
+    {name:"Downtown Revitalization", type:"Project"},
+    {name:"Water Allocation", type:"Program"},
+    {name:"Zoning Map Update", type:"Policy"}
+  ];
+  const TILE_LAYOUT = [
+    ["","WA","MT","ND","MN","WI","MI","","VT","NH","ME",""],
+    ["","OR","ID","SD","IA","IL","IN","OH","PA","NY","MA",""],
+    ["","CA","NV","WY","NE","MO","KY","WV","VA","NJ","CT","RI"],
+    ["","UT","AZ","CO","KS","AR","TN","NC","SC","MD","DE",""],
+    ["","NM","TX","OK","LA","MS","AL","GA","","DC","",""],
+    ["","AK","","","","","","FL","","","","HI"]
+  ];
+
+  const normalizeSpaces = (s)=>String(s??"").replace(/\s+/g," ").trim();
+  const stateName = (abbr)=> (STATES.find(x=>x[0]===abbr)?.[1] || abbr);
+  const setChip = (el,on)=>el.setAttribute("aria-pressed", on?"true":"false");
+
+  function parseDateOnly(s){
+    const m = /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/.exec(String(s||"").trim());
+    if(!m) return null;
+    return new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), 12, 0, 0, 0);
+  }
+  function fmtHuman(dateStr){
+    const d = parseDateOnly(dateStr);
+    if(!d) return String(dateStr||"");
+    return d.toLocaleDateString(undefined, { weekday:"short", year:"numeric", month:"short", day:"numeric" });
+  }
+  function parseTimeToMinutes(s){
+    s = String(s||"").trim().replace(/\s+/g," ");
+    if(!s) return null;
+    const m = /^(\d{1,2})(?::(\d{2}))?\s*(AM|PM)$/i.exec(s);
+    if(!m) return null;
+    let hh = Number(m[1]);
+    const mm = Number(m[2]||"0");
+    const ap = m[3].toUpperCase();
+    if(ap==="PM" && hh!==12) hh += 12;
+    if(ap==="AM" && hh===12) hh = 0;
+    return hh*60+mm;
+  }
+  function computeMoment(meet){
+    const d = parseDateOnly(meet.date);
+    if(!d) return Number.POSITIVE_INFINITY;
+    const mins = parseTimeToMinutes(meet.time);
+    if(mins!==null) d.setHours(Math.floor(mins/60), mins%60, 0, 0);
+    return d.getTime();
+  }
+  function isWithinDays(dateStr, days){
+    if(days==="all") return true;
+    const d = parseDateOnly(dateStr);
+    if(!d) return true;
+    const now = new Date();
+    const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0,0,0,0);
+    const end = new Date(start.getTime() + Number(days)*24*60*60*1000);
+    return d >= start && d <= end;
+  }
+  function safeSummary(summary){
+    if(Array.isArray(summary)) return summary.filter(Boolean).map(s=>String(s).trim()).filter(Boolean);
+    return [];
+  }
+  function formatCompact(n){
+    n = Number(n);
+    if(!isFinite(n)) return "—";
+    if(n >= 1_000_000) return (n/1_000_000).toFixed(1).replace(/\.0$/,"") + "M";
+    if(n >= 1_000) return (n/1_000).toFixed(1).replace(/\.0$/,"") + "K";
+    return String(Math.round(n));
+  }
+
+  function hashStr(s){
+    s = String(s||"");
+    let h = 2166136261 >>> 0;
+    for(let i=0;i<s.length;i++){
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+  }
+  function rand(seed){
+    let s = seed >>> 0;
+    return function(){
+      s = (1664525 * s + 1013904223) >>> 0;
+      return (s & 0xFFFFFFFF) / 0x100000000;
+    };
+  }
+  const pick = (r, arr)=>arr[Math.floor(r()*arr.length)];
+  function pickN(r, arr, n){
+    const a = arr.slice(); const out=[];
+    while(out.length<n && a.length) out.push(a.splice(Math.floor(r()*a.length),1)[0]);
+    return out;
+  }
+  function makeSentSeries(r, n=14, center=0.52){
+    const pts=[]; let v = center + (r()-0.5)*0.18;
+    for(let i=0;i<n;i++){
+      v += (r()-0.5)*0.12;
+      v = Math.max(0.1, Math.min(0.9, v));
+      pts.push(v);
+    }
+    return pts;
+  }
+  function seriesToPolyline(series){
+    const w=300, h=84, padTop=8, padBottom=12;
+    const usableH=h-padTop-padBottom;
+    const step=w/(series.length-1);
+    return series.map((v,i)=>{
+      const x=i*step;
+      const y=padTop + (1-v)*usableH;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(" ");
+  }
+
+  function makeCouncilRoster(r){
+    const last = ["Nguyen","Garcia","Patel","Johnson","Martinez","Kim","Brown","Davis","Lopez","Wilson","Chen","Singh"];
+    const first = ["A.","B.","C.","D.","E.","F.","G.","H.","I.","J."];
+    const n = 7 + Math.floor(r()*4);
+    const out=[];
+    for(let i=0;i<n;i++) out.push(`Member ${pick(r, first)} ${pick(r, last)}`);
+    return Array.from(new Set(out)).slice(0,n);
+  }
+  function makeSummary(r, topic, keywords, entities){
+    const e1 = entities[0]?.name || "Key stakeholder";
+    const e2 = entities[1]?.name || "Policy item";
+    const k1 = pick(r, keywords);
+    const k2 = pick(r, keywords);
+    const bullets = [
+      `Consideration of ${topic.toLowerCase()} package; staff recommends phased adoption and impact review.`,
+      `Public comment expected regarding ${k1} and neighborhood impacts; outreach summary included.`,
+      `Council to review amendment language referencing ${e1}; legal notes provided.`,
+      `Budget implication: preliminary estimate and funding options for ${k2}.`,
+      `Next steps include vote on motion and scheduling of follow-up hearing for ${e2}.`
+    ];
+    return bullets.slice(0, 4 + Math.floor(r()*2));
+  }
+  function makeVotes(r, council, summary){
+    const items = pickN(r, summary, 3).map((s,i)=>{
+      const title = s.replace(/^Consideration of /i,"").slice(0, 64);
+      const passed = r() > 0.22;
+      const yesCount = passed ? Math.floor(council.length*(0.65 + r()*0.25)) : Math.floor(council.length*(0.35 + r()*0.2));
+      const votes={};
+      const shuffled = council.slice().sort(()=> (r()-0.5));
+      shuffled.forEach((m, idx)=>{
+        if(idx < yesCount) votes[m] = "Aye";
+        else votes[m] = (r()>0.15) ? "Nay" : "Absent";
+      });
+      return { title:title || `Agenda item ${i+1}`, outcome: passed ? `Passed ${yesCount}–${council.length-yesCount}` : `Failed ${yesCount}–${council.length-yesCount}`, votes };
+    });
+    return { available:true, members:council, items };
+  }
+  function makeArchive(r, city, topic){
+    const years=[2022,2023,2024,2025];
+    const results=[];
+    const n=6 + Math.floor(r()*6);
+    for(let i=0;i<n;i++){
+      const y=pick(r, years), m=1+Math.floor(r()*12), d=1+Math.floor(r()*28);
+      const date=`${y}-${String(m).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+      results.push({
+        date,
+        title:`${city}: ${topic} — Archive record`,
+        hasAgenda:r()>0.12, hasMinutes:r()>0.30, hasTranscript:r()>0.50,
+        outcome:(r()>0.45) ? "Outcome recorded" : "Pending / unknown"
+      });
+    }
+    results.sort((a,b)=> (a.date<b.date?1:-1));
+    return { years, results };
+  }
+
+  function makeMockData(){
+    const r = rand(20260122);
+    const now = new Date();
+
+    const stateCoverage = {};
+    for(const [abbr] of STATES){
+      stateCoverage[abbr] = (abbr==="CO") ? 4 : (1 + Math.floor(r()*4));
+    }
+
+    const cities = MAJOR_CITIES.map((c)=>{
+      const [st, name, body] = c;
+      const localR = rand(hashStr(st+"|"+name));
+      const providers=["Legistar","CivicClerk","AgendaSuite","Granicus","City Portal"];
+      const provider=pick(localR, providers);
+      const coverage = Math.min(4, Math.max(2, 1 + Math.floor(localR()*4)));
+      stateCoverage[st] = Math.max(stateCoverage[st]||1, coverage);
+      return { id:`${st}-${name.replace(/\s+/g,"")}`, state:st, city:name, body, provider, coverage, council: makeCouncilRoster(localR) };
+    });
+
+    const meetings = [];
+    for(const c of cities){
+      const localR = rand(hashStr("MEET|"+c.id));
+      const count = 6 + Math.floor(localR()*7);
+      for(let i=0;i<count;i++){
+        const daysOut = 1 + Math.floor(localR()*35);
+        const d = new Date(now.getTime() + daysOut*24*60*60*1000);
+        const date = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+        const time = pick(localR, ["5:00 PM","6:00 PM","6:30 PM","7:00 PM","9:00 AM","1:30 PM"]);
+        const topic = pick(localR, TOPICS);
+        const topicName = topic[0], keywords=topic[1];
+
+        const entityPool = ENTITY_SEEDS.concat([
+          {name:`${c.city} Housing Authority`, type:"Organization"},
+          {name:`${c.city} Chamber of Commerce`, type:"Organization"},
+          {name:`RFP: ${topicName} Services`, type:"Process"},
+          {name:`Program: ${c.city} Relief Fund`, type:"Program"}
+        ]);
+
+        const entities = pickN(localR, entityPool, 5 + Math.floor(localR()*3)).map(e=>({
+          name:e.name, type:e.type, mentions:3 + Math.floor(localR()*28),
+          trend: makeSentSeries(localR, 12, 0.55)
+        }));
+
+        const hasAgenda = localR() > 0.18;
+        const hasTranscript = localR() > 0.40;
+        const hasVotes = localR() > 0.52;
+
+        const summary = makeSummary(localR, topicName, keywords, entities);
+
+        const meetingType = pick(localR, ["City Council Meeting","Work Session","Public Hearing","Committee Meeting","Budget Hearing","Special Meeting"]);
+
+        const id = `M-${c.state}-${c.city.replace(/\s+/g,"")}-${date}-${i}`;
+
+        meetings.push({
+          id, state:c.state, city:c.city, body:c.body, provider:c.provider,
+          meeting_type: meetingType, date, time, status:"Scheduled", location:"City Hall (Hybrid)",
+          agenda_url: hasAgenda ? `https://example.com/agenda/${encodeURIComponent(id)}` : "",
+          source: `https://example.com/source/${encodeURIComponent(c.city)}`,
+          summary, entities,
+          transcript: hasTranscript ? { available:true, sentimentSeries: makeSentSeries(localR, 14, 0.52) } : { available:false },
+          votes: hasVotes ? makeVotes(localR, c.council, summary) : { available:false },
+          archive: makeArchive(localR, c.city, topicName),
+          isLive:false,
+          topic: topicName
+        });
+      }
+    }
+
+    const kpis = {
+      citiesCovered: 320 + Math.floor(r()*90),
+      meetings30d: 18420 + Math.floor(r()*3500),
+      entitiesTracked: 1200000 + Math.floor(r()*520000)
+    };
+
+    return { stateCoverage, cities, meetings, kpis };
+  }
+
+  function deriveProvider(m){
+    const prov = normalizeSpaces(m.provider);
+    if(prov) return prov;
+    const src = normalizeSpaces(m.source);
+    if(!src) return "Unknown";
+    try{ return new URL(src).hostname.replace(/^www\./,""); }catch(_){ return "Unknown"; }
+  }
+  function cleanType(m){
+    let t = normalizeSpaces(m.meeting_type);
+    if(!t) t = normalizeSpaces(m.body) || "Meeting";
+    if(t.length > 60) t = t.slice(0,57)+"…";
+    return t;
+  }
+  function inferTopicFromText(s){
+    const t = String(s||"").toLowerCase();
+    if(/zoning|housing|adu|rezon|short-term|airbnb/.test(t)) return "Housing & Zoning";
+    if(/budget|tax|bond|audit|appropriat/.test(t)) return "Budget & Tax";
+    if(/police|fire|ems|safety|crime|camera/.test(t)) return "Public Safety";
+    if(/transit|bike|parking|traffic|i-\d+|vision zero/.test(t)) return "Transportation";
+    if(/water|drought|solar|grid|waste|climate/.test(t)) return "Climate & Utilities";
+    if(/appointments|ethics|rules|charter|procurement|transparency/.test(t)) return "Civic Governance";
+    return "Civic Governance";
+  }
+  function extractEntitiesFromLive(meet){
+    const text = [meet.city, meet.body, meet.meeting_type, ...(meet.summary||[])].join(" • ");
+    const keep = new Set();
+    const ord = text.match(/(Ordinance|Resolution|Bill)\s*\d{1,4}[-–]\d{1,4}/gi) || [];
+    ord.forEach(x=>keep.add(x.replace(/\s+/g," ").trim()));
+    const caps = text.match(/[A-Z][a-z]+\s+[A-Z][a-z]+/g) || [];
+    caps.slice(0,8).forEach(x=>keep.add(x));
+    const kws=["zoning","budget","housing","water","police","transit","annexation","ordinance","tax","bond"];
+    kws.forEach(k=>{ if(text.toLowerCase().includes(k)) keep.add(k[0].toUpperCase()+k.slice(1)); });
+    const r = rand(hashStr(meet.id||meet.city+meet.date));
+    pickN(r, ENTITY_SEEDS, 2).map(e=>e.name).forEach(x=>keep.add(x));
+    return Array.from(keep).slice(0,8).map(name=>({
+      name,
+      type: name.startsWith("Ordinance") || name.startsWith("Resolution") ? "Ordinance" : "Topic",
+      mentions: 2 + Math.floor(rand(hashStr(name))()*20),
+      trend: makeSentSeries(rand(hashStr(name+meet.date)), 12, 0.55)
+    }));
+  }
+  function toCanonicalFromLive(m){
+    const city = normalizeSpaces(m.city) || "Colorado";
+    const id = `LIVE-CO-${city.replace(/\s+/g,"")}-${normalizeSpaces(m.date)}-${hashStr(normalizeSpaces(m.meeting_type))}`;
+    const summary = safeSummary(m.agenda_summary);
+    const entities = extractEntitiesFromLive({ id, city, date:m.date, body:m.body, meeting_type:m.meeting_type, summary });
+    return {
+      id, state:"CO", city,
+      body: normalizeSpaces(m.body),
+      provider: deriveProvider(m),
+      meeting_type: cleanType(m),
+      date: normalizeSpaces(m.date),
+      time: normalizeSpaces(m.start_time_local) || "Time TBA",
+      status: normalizeSpaces(m.status) || "Scheduled",
+      location: normalizeSpaces(m.location) || "",
+      agenda_url: normalizeSpaces(m.agenda_url),
+      source: normalizeSpaces(m.source),
+      summary: summary.length ? summary : ["No summary yet for this meeting in the live feed."],
+      entities,
+      transcript: { available:false },
+      votes: { available:false },
+      archive: { years:[2024,2025], results:[] },
+      isLive:true,
+      topic: inferTopicFromText(summary.join(" ") + " " + (m.meeting_type||"") + " " + (m.body||""))
+    };
+  }
+
+  function getLiveMeetingsCO(){ return (liveCO.meetings||[]).map(toCanonicalFromLive); }
+  function meetingsForState(abbr){
+    const demo = (mock?.meetings||[]).filter(m=>m.state===abbr);
+    if(abbr !== "CO") return demo;
+    const live = getLiveMeetingsCO();
+    const seen = new Set();
+    const out=[];
+    for(const m of live){
+      const k = `${m.city}|${m.date}|${m.meeting_type}`;
+      if(seen.has(k)) continue;
+      seen.add(k); out.push(m);
+    }
+    let added=0;
+    for(const m of demo){
+      if(added>=6) break;
+      const k = `${m.city}|${m.date}|${m.meeting_type}`;
+      if(seen.has(k)) continue;
+      out.push(m); added++;
+    }
+    return out;
+  }
+  function getScopeMeetings(){
+    const list = meetingsForState(selectedState);
+    if(selectedCity) return list.filter(m=>m.city===selectedCity);
+    return list;
+  }
+
+  function coverageClass(abbr){
+    const c = (mock?.stateCoverage?.[abbr] ?? 0);
+    if(c<=0) return "cov-0";
+    return `cov-${c}`;
+  }
+  function sentimentSeriesForScope(state, source){
+    const r = rand(hashStr(state + "|" + source));
+    const base = source==="public" ? 0.48 : source==="staff" ? 0.58 : 0.54;
+    const series = makeSentSeries(r, 14, base);
+    const meets = meetingsForState(state).filter(m=>m.transcript && m.transcript.available);
+    if(meets.length){
+      const pickM = meets[Math.floor(r()*meets.length)];
+      const s2 = pickM.transcript.sentimentSeries || series;
+      for(let i=0;i<series.length;i++) series[i] = (series[i]*0.55 + (s2[i] ?? series[i])*0.45);
+    }
+    return series;
+  }
+  function topEntitiesForState(abbr, n=6){
+    const agg = {};
+    const list = meetingsForState(abbr);
+    for(const m of list){
+      for(const e of (m.entities||[])){
+        if(!agg[e.name]) agg[e.name] = { name:e.name, type:e.type, mentions:0, trend:e.trend || makeSentSeries(rand(hashStr(e.name)),12,0.55) };
+        agg[e.name].mentions += e.mentions || 1;
+      }
+    }
+    return Object.values(agg).sort((a,b)=>b.mentions-a.mentions).slice(0,n);
+  }
+  function stateTooltip(abbr){
+    const name = stateName(abbr);
+    const cov = mock?.stateCoverage?.[abbr] ?? 0;
+    const covLabel = ["No data","Limited","Growing","Strong","Full"][cov] || "—";
+    const ents = topEntitiesForState(abbr, 3).map(e=>e.name);
+    const entLine = ents.length ? `Top entities: ${ents.join(", ")}` : "Top entities: —";
+    const live = (abbr==="CO") ? "Colorado uses LIVE feed where available." : "Demo dataset for national scale.";
+    return `<strong>${esc(name)} (${abbr})</strong><br/>Coverage: <span class="badge">${esc(covLabel)}</span><br/>${esc(entLine)}<br/><span style="color:rgba(255,255,255,.72)">${esc(live)}</span>`;
+  }
+  function renderMap(){
+    gridmap.innerHTML = "";
+    for(const row of TILE_LAYOUT){
+      for(const cell of row){
+        const abbr = cell;
+        if(!abbr){
+          const div = document.createElement("div");
+          div.className="st"; div.dataset.empty="true";
+          gridmap.appendChild(div);
+          continue;
+        }
+        const div = document.createElement("div");
+        div.className = `st ${coverageClass(abbr)} ${abbr===selectedState ? "selected" : ""}`;
+        div.textContent = abbr;
+        div.dataset.state = abbr;
+
+        const tt = document.createElement("div");
+        tt.className="tt";
+        tt.innerHTML = stateTooltip(abbr);
+        div.appendChild(tt);
+
+        div.addEventListener("click", ()=> setSelectedState(abbr));
+        gridmap.appendChild(div);
+      }
+    }
+    applyMapMode();
+  }
+  function applyMapMode(){
+    const cells = $$(".st[data-state]", gridmap);
+    for(const c of cells){
+      const abbr = c.dataset.state;
+      c.className = c.className.replace(/cov-\d/g,"").trim();
+      const base = (mock?.stateCoverage?.[abbr] ?? 0);
+      let v = base;
+
+      if(mapMode==="topics"){
+        const n = meetingsForState(abbr).filter(m=>isWithinDays(m.date, "14")).length;
+        v = Math.min(4, Math.max(1, Math.floor(n/10)+1));
+      }else if(mapMode==="sentiment"){
+        const series = sentimentSeriesForScope(abbr, sentimentSource.value);
+        const avg = series.reduce((a,b)=>a+b,0)/Math.max(1,series.length);
+        v = (avg>0.62) ? 4 : (avg>0.55) ? 3 : (avg>0.48) ? 2 : 1;
+      }else{
+        v = base;
+      }
+
+      c.classList.add(`cov-${v}`);
+      c.classList.toggle("selected", abbr===selectedState);
+    }
+  }
+
+  function refreshSelectors(){
+    stateSel.innerHTML = STATES.map(([abbr,name])=>`<option value="${abbr}">${abbr} — ${esc(name)}</option>`).join("");
+    stateSel.value = selectedState;
+
+    const citySet = new Set(getScopeMeetings().map(m=>m.city));
+    const cities = Array.from(citySet).sort((a,b)=>a.localeCompare(b));
+    const allLabel = selectedState==="CO" ? "All cities (CO • live+demo)" : "All cities (demo)";
+    citySel.innerHTML = `<option value="">${esc(allLabel)}</option>` + cities.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    if(selectedCity && cities.includes(selectedCity)) citySel.value = selectedCity;
+    else { selectedCity=""; citySel.value=""; }
+
+    const vCities = cities.slice(0, 10);
+    voteCitySel.innerHTML = vCities.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join("");
+    if(!voteCitySel.value && vCities.length) voteCitySel.value = vCities[0];
+  }
+
+  function setSelectedState(abbr){
+    selectedState = abbr;
+    selectedCity = "";
+    selectedStateBadge.textContent = `State: ${abbr}`;
+    analyticsScope.textContent = `Scope: ${stateName(abbr)} (${abbr})`;
+    modeNote.textContent = (abbr==="CO") ? "Colorado selected" : `Selected: ${abbr}`;
+    refreshSelectors();
+    applyMapMode();
+    renderFeed();
+    renderAnalytics();
+  }
+
+  const hasAgenda = (m)=>!!String(m.agenda_url||"").trim();
+  const hasTranscript = (m)=>!!(m.transcript && m.transcript.available);
+  const hasVotes = (m)=>!!(m.votes && m.votes.available);
+
+  function matchesQuery(m, term){
+    if(!term) return true;
+    const hay = [
+      m.city, m.body, m.meeting_type, m.status, m.location, m.provider, m.topic,
+      ...(m.summary||[]),
+      ...(m.entities||[]).map(e=>e.name)
+    ].join(" • ").toLowerCase();
+    return hay.includes(term);
+  }
+
+  function filteredMeetings(){
+    let list = getScopeMeetings();
+    list = list.filter(m=>isWithinDays(m.date, filters.rangeDays));
+    if(filters.onlyAgenda) list = list.filter(hasAgenda);
+    if(filters.onlyTranscript) list = list.filter(hasTranscript);
+    if(filters.onlyVotes) list = list.filter(hasVotes);
+    const term = String(filters.q||"").trim().toLowerCase();
+    if(term) list = list.filter(m=>matchesQuery(m, term));
+    if(filters.sort==="date_asc") list.sort((a,b)=>computeMoment(a)-computeMoment(b));
+    else if(filters.sort==="date_desc") list.sort((a,b)=>computeMoment(b)-computeMoment(a));
+    else if(filters.sort==="city_asc") list.sort((a,b)=>(a.city||"").localeCompare(b.city||"") || (computeMoment(a)-computeMoment(b)));
+    return list;
+  }
+
+  function tagForAvailability(m){
+    const tags = [];
+    tags.push(m.isLive ? `<span class="tag good" title="This meeting comes from the live Colorado feed.">LIVE</span>`
+                      : `<span class="tag" title="Demo dataset (national expansion).">DEMO</span>`);
+    tags.push(hasAgenda(m) ? `<span class="tag good">Agenda</span>` : `<span class="tag warn">No agenda</span>`);
+    tags.push(hasTranscript(m) ? `<span class="tag good" title="Transcript available (demo).">Transcript</span>` : `<span class="tag" title="Transcript (premium) preview.">Transcript</span>`);
+    tags.push(hasVotes(m) ? `<span class="tag good" title="Votes available (demo).">Votes</span>` : `<span class="tag" title="Votes (premium) preview.">Votes</span>`);
+    return tags.join("");
+  }
+
+  function renderFeed(){
+    error.classList.add("hidden");
+    empty.classList.add("hidden");
+
+    const list = filteredMeetings();
+    resultsBadge.textContent = `${list.length} results`;
+    citiesBadge.textContent = `${new Set(list.map(m=>m.city)).size} cities`;
+
+    feed.innerHTML = "";
+    if(!list.length){
+      empty.classList.remove("hidden");
+      return;
+    }
+
+    for(const m of list.slice(0, 18)){
+      const entChips = (m.entities||[]).slice(0,4).map(e=>`<span class="tag" title="${esc(e.type)}">${esc(e.name)}</span>`).join("");
+      const summary = safeSummary(m.summary).slice(0, 5);
+
+      const card = document.createElement("article");
+      card.className="card";
+      card.innerHTML = `
+        <div class="card-top">
+          <div class="title">
+            <div class="line1">
+              <span>${esc(m.city)}</span>
+              <span class="tag">${esc(m.meeting_type)}</span>
+              <span class="tag">${esc(stateName(m.state))}</span>
+              ${m.body ? `<span class="tag">${esc(m.body)}</span>` : ``}
             </div>
-            <div class="bars" id="barsProviders"></div>
-          </div>
-        </section>
-
-        <section id="vision" class="panel">
-          <div class="panel-head">
-            <h3>Roadmap (demo)</h3>
-            <div class="meta"><span class="badge">Evolution</span></div>
-          </div>
-          <div class="panel-body">
-            <div class="timeline">
-              <div class="milestone">
-                <h4>Phase 1 — Solidify the foundation</h4>
-                <div class="when">Now → ~6 months</div>
-                <ul>
-                  <li>Expand coverage across a focused region (build a loyal user base).</li>
-                  <li>Harden scraping and introduce basic user accounts + keyword alerts.</li>
-                  <li>Start decoupling frontend/data with an internal API (future-proofing).</li>
-                </ul>
-              </div>
-              <div class="milestone">
-                <h4>Phase 2 — Premium features</h4>
-                <div class="when">~6 → 18 months</div>
-                <ul>
-                  <li>Historical archives + advanced search (minutes, past agendas).</li>
-                  <li>Unlimited jurisdictions/alerts for Pro users.</li>
-                  <li>Simple topic dashboards + expansion to a second state.</li>
-                </ul>
-              </div>
-              <div class="milestone">
-                <h4>Phase 3 — Enterprise scale</h4>
-                <div class="when">18+ months</div>
-                <ul>
-                  <li>Entity tracking, voting patterns, sentiment on transcripts.</li>
-                  <li>Team management, custom reporting, high-throughput API.</li>
-                  <li>Distributed cloud infrastructure for national coverage.</li>
-                </ul>
-              </div>
+            <div class="line2">
+              <span class="tag">${esc(fmtHuman(m.date))}</span>
+              <span class="tag">${esc(m.time || "Time TBA")}</span>
+              <span class="tag">${esc(m.status || "Scheduled")}</span>
+              <span class="tag">${esc(m.provider || "Provider")}</span>
+              ${m.topic ? `<span class="tag">${esc(m.topic)}</span>` : ``}
             </div>
+            <div class="line2">${entChips}</div>
           </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-head">
-            <h3>Monetization (demo)</h3>
-            <div class="meta"><span class="badge">Freemium</span></div>
+          <div class="actions">
+            ${tagForAvailability(m)}
+            ${m.agenda_url ? `<a class="btn small" href="${esc(m.agenda_url)}" target="_blank" rel="noopener">Agenda</a>` : ``}
+            ${m.source ? `<a class="btn small" href="${esc(m.source)}" target="_blank" rel="noopener">Source</a>` : ``}
+            <button class="btn primary small" type="button" data-open="${esc(m.id)}">Open brief</button>
           </div>
-          <div class="panel-body">
-            <div class="pricing">
-              <div class="tier">
-                <div class="tier-head">
-                  <div>
-                    <h4>Free (Community)</h4>
-                    <div class="aud">Citizens, students, community groups</div>
-                  </div>
-                  <div class="price">$0</div>
-                </div>
-                <div class="tier-body">
-                  <ul>
-                    <li>Current agendas + summaries</li>
-                    <li>Limited jurisdictions (example: 3 cities)</li>
-                    <li>Limited keyword alerts (example: 5)</li>
-                  </ul>
-                </div>
-              </div>
+        </div>
+        <div class="card-body">
+          <div class="summary">
+            ${summary.length ? `<ul>${summary.map(x=>`<li>${esc(x)}</li>`).join("")}</ul>` : `<div class="muted">No summary.</div>`}
+          </div>
+          <div class="footnote">${m.isLive ? `Live feed item • ` : `Demo item • `}Click <span class="badge">Open brief</span> for entities, votes, and archives.</div>
+        </div>
+      `;
+      card.querySelector("button[data-open]")?.addEventListener("click", ()=> openModalById(m.id));
+      feed.appendChild(card);
+    }
 
-              <div class="tier">
-                <div class="tier-head">
-                  <div>
-                    <h4>Pro (Professional)</h4>
-                    <div class="aud">Journalists, activists, small business</div>
-                  </div>
-                  <div class="price">~$25 / month</div>
-                </div>
-                <div class="tier-body">
-                  <ul>
-                    <li>Unlimited jurisdictions + alerts</li>
-                    <li>Historical search (agendas & minutes)</li>
-                    <li>Saved searches + weekly digests</li>
-                  </ul>
-                </div>
-              </div>
+    if(list.length > 18){
+      const more = document.createElement("div");
+      more.className="footnote";
+      more.style.marginTop="8px";
+      more.textContent = `Showing 18 of ${list.length}. Narrow your filters to drill in.`;
+      feed.appendChild(more);
+    }
 
-              <div class="tier">
-                <div class="tier-head">
-                  <div>
-                    <h4>Enterprise</h4>
-                    <div class="aud">Law/lobbying, corporations, media orgs</div>
-                  </div>
-                  <div class="price">$200 → $2,000+ / mo</div>
-                </div>
-                <div class="tier-body">
-                  <ul>
-                    <li>Team accounts + admin controls</li>
-                    <li>Advanced dashboards + reporting</li>
-                    <li>API access (metered / usage-based)</li>
-                    <li>Priority support</li>
-                  </ul>
-                </div>
-              </div>
-            </div>
+    updateScopeKPIs();
+  }
 
+  function setActiveTab(tab){
+    $$(".tab", overlay).forEach(t=>t.setAttribute("aria-selected", t.dataset.tab===tab ? "true":"false"));
+    tabBrief.classList.toggle("hidden", tab!=="brief");
+    tabEntities.classList.toggle("hidden", tab!=="entities");
+    tabVotes.classList.toggle("hidden", tab!=="votes");
+    tabArchive.classList.toggle("hidden", tab!=="archive");
+  }
+  function estimateImpact(m){
+    const text = (safeSummary(m.summary).join(" ") + " " + (m.topic||"")).toLowerCase();
+    const high = /budget|tax|bond|zoning|rezon|police|union|contract|procurement|lawsuit|annex/.test(text);
+    const med = /appointment|hearing|planning|transit|water|utility/.test(text);
+    return high ? "High" : med ? "Medium" : "Low";
+  }
+  function deepDataLabel(m){
+    const parts=[];
+    if(hasTranscript(m)) parts.push("Transcript");
+    if(hasVotes(m)) parts.push("Votes");
+    if(hasAgenda(m)) parts.push("Agenda");
+    return parts.length ? parts.join(", ") : "—";
+  }
+  function openModalById(id){
+    const list = meetingsForState(selectedState);
+    const m = list.find(x=>x.id===id) || (mock?.meetings||[]).find(x=>x.id===id) || getLiveMeetingsCO().find(x=>x.id===id);
+    if(!m) return;
+
+    modalTitle.textContent = `${m.city} • ${m.meeting_type}`;
+    modalSub.textContent = `${stateName(m.state)} • ${fmtHuman(m.date)} • ${m.time || "Time TBA"} • ${m.provider || "Provider"}`;
+
+    if(m.agenda_url){
+      modalAgendaBtn.classList.remove("hidden");
+      modalAgendaBtn.href = m.agenda_url;
+    }else{
+      modalAgendaBtn.classList.add("hidden");
+      modalAgendaBtn.href="#";
+    }
+
+    const bullets = safeSummary(m.summary);
+    tabBrief.innerHTML = `
+      <div class="pillbox" style="margin-bottom:12px;">
+        <span class="pill2" title="Demo: impact scoring based on agenda content and historical signals">Impact <span class="tiny">${esc(estimateImpact(m))}</span></span>
+        <span class="pill2" title="Demo: whether transcripts/votes are available for deeper analysis">Deep data <span class="tiny">${esc(deepDataLabel(m))}</span></span>
+        <span class="pill2" title="Demo: the top detected entity for this meeting">Top entity <span class="tiny">${esc((m.entities||[])[0]?.name || "—")}</span></span>
+      </div>
+      <div class="mini-panel">
+        <div class="mini-head"><h4>What matters</h4><span class="badge">${m.isLive ? "LIVE" : "DEMO"}</span></div>
+        <div class="mini-body">
+          <div class="summary"><ul>${bullets.slice(0,7).map(x=>`<li>${esc(x)}</li>`).join("")}</ul></div>
+          <div class="footnote" style="margin-top:10px;">Demo: summaries can be auto-emailed as alerts or posted to Slack/MS Teams.</div>
+        </div>
+      </div>
+    `;
+
+    const ents = (m.entities||[]).slice().sort((a,b)=>(b.mentions||0)-(a.mentions||0)).slice(0, 10);
+    tabEntities.innerHTML = `
+      <table>
+        <thead><tr><th>Entity</th><th>Type</th><th>Mentions</th><th>Trend</th></tr></thead>
+        <tbody>
+          ${ents.map(e=>`
+            <tr>
+              <td><span class="badge">${esc(e.name)}</span></td>
+              <td>${esc(e.type||"—")}</td>
+              <td>${esc(e.mentions ?? "—")}</td>
+              <td>
+                <svg viewBox="0 0 300 84" preserveAspectRatio="none" style="width:120px;height:28px">
+                  <polyline fill="none" stroke="rgba(125,211,252,.9)" stroke-width="2" points="${seriesToPolyline(e.trend || makeSentSeries(rand(hashStr(e.name)), 12, 0.55))}"></polyline>
+                </svg>
+              </td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+      <div class="footnote" style="margin-top:10px;">Demo: entity pages link all mentions across agendas, minutes, transcripts, and related news.</div>
+    `;
+
+    if(m.votes && m.votes.available){
+      const members = m.votes.members || [];
+      const items = m.votes.items || [];
+      const first = items[0];
+      const rows = members.map(mem=>{
+        const v = first?.votes?.[mem] || "—";
+        const cls = (v==="Aye") ? "aye" : (v==="Nay") ? "nay" : (v==="Absent") ? "abs" : "";
+        return `<tr><td>${esc(mem)}</td><td><span class="vote ${cls}"></span>${esc(v)}</td></tr>`;
+      }).join("");
+      tabVotes.innerHTML = `
+        <div class="pillbox" style="margin-bottom:10px;">
+          ${items.map(it=>`<span class="pill2" title="${esc(it.title)}">${esc(it.outcome)}</span>`).join("")}
+        </div>
+        <div class="muted" style="margin-bottom:10px;">Showing roll-call for: <span class="badge">${esc(first?.title || "Agenda item")}</span></div>
+        <table><thead><tr><th>Member</th><th>Vote</th></tr></thead><tbody>${rows}</tbody></table>
+        <div class="footnote" style="margin-top:10px;">Demo: alignment + issue clusters derived from vote history across years.</div>
+      `;
+    }else{
+      tabVotes.innerHTML = `
+        <div class="mini-panel">
+          <div class="mini-head"><h4>Votes & outcomes</h4><span class="badge">Premium</span></div>
+          <div class="mini-body">
+            <div class="muted">Votes aren’t available for this meeting in the current dataset. In production, MeetingWatch parses roll-call votes from minutes and transcripts.</div>
             <div class="hr"></div>
-            <div class="footnote">
-              This section is <em>visual brainstorming UI</em>. The demo is still powered purely by the existing
-              <span class="badge">meetings.json</span> feed — no auth, billing, or backend required yet.
+            <div class="pillbox">
+              <span class="pill2">Member alignment</span>
+              <span class="pill2">Swing votes</span>
+              <span class="pill2">Issue clusters</span>
+              <span class="pill2">Outcomes tracking</span>
             </div>
           </div>
-        </section>
-      </aside>
-    </div>
-  </main>
+        </div>
+      `;
+    }
 
-  <footer class="footer">
-    <div class="container">
-      <div class="hr"></div>
-      Built as a single-file demo page for brainstorming •
-      <span class="badge">demo.html</span> •
-      Data source: <a href="https://human83.github.io/MeetingWatch/data/meetings.json">MeetingWatch/data/meetings.json</a>
-    </div>
-  </footer>
+    const arch = m.archive?.results || [];
+    tabArchive.innerHTML = `
+      <table>
+        <thead><tr><th>Date</th><th>Record</th><th>Docs</th><th>Outcome</th></tr></thead>
+        <tbody>
+          ${arch.slice(0,8).map(r=>`
+            <tr>
+              <td>${esc(fmtHuman(r.date))}</td>
+              <td>${esc(r.title)}</td>
+              <td>
+                ${r.hasAgenda ? `<span class="tag good">Agenda</span>` : `<span class="tag">Agenda</span>`}
+                ${r.hasMinutes ? `<span class="tag good">Minutes</span>` : `<span class="tag">Minutes</span>`}
+                ${r.hasTranscript ? `<span class="tag good">Transcript</span>` : `<span class="tag">Transcript</span>`}
+              </td>
+              <td class="muted">${esc(r.outcome)}</td>
+            </tr>
+          `).join("")}
+        </tbody>
+      </table>
+      <div class="footnote" style="margin-top:10px;">Demo: archive is searchable by topic, entity, and ordinance number.</div>
+    `;
 
-  <script>
-    (function(){
-      "use strict";
+    setActiveTab("brief");
+    overlay.classList.add("open");
+  }
+  function closeModal(){ overlay.classList.remove("open"); }
+  modalClose.addEventListener("click", closeModal);
+  overlay.addEventListener("click", (e)=>{ if(e.target===overlay) closeModal(); });
+  document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && overlay.classList.contains("open")) closeModal(); });
+  $$(".tab", overlay).forEach(t=>{
+    t.addEventListener("click", ()=> setActiveTab(t.dataset.tab));
+    t.addEventListener("keydown", (e)=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); setActiveTab(t.dataset.tab);} });
+  });
 
-      // --- Configuration ---
-      const FEED_URL = "https://human83.github.io/MeetingWatch/data/meetings.json";
+  function renderEntityTracker(){
+    const term = String(entitySearch.value||"").trim().toLowerCase();
+    const ents = topEntitiesForState(selectedState, 12);
+    const filtered = term ? ents.filter(e=>e.name.toLowerCase().includes(term)) : ents.slice(0,8);
 
-      // --- DOM ---
-      const el = (id) => document.getElementById(id);
+    entityChips.innerHTML = "";
+    if(!filtered.length){
+      entityChips.innerHTML = `<span class="muted">No matches. Try a broader entity name.</span>`;
+      entityLine.setAttribute("points","");
+      return;
+    }
+    const active = filtered[0];
+    for(const e of filtered.slice(0,8)){
+      const chip = document.createElement("span");
+      chip.className="pill2";
+      chip.style.cursor="pointer";
+      chip.title = `Type: ${e.type||"—"} • Mentions (demo): ${e.mentions||"—"}`;
+      chip.textContent = e.name;
+      chip.addEventListener("click", ()=>{
+        entityLine.setAttribute("points", seriesToPolyline(e.trend || makeSentSeries(rand(hashStr(e.name)),12,0.55)));
+        highlightChip(chip);
+      });
+      entityChips.appendChild(chip);
+    }
+    entityLine.setAttribute("points", seriesToPolyline(active.trend || makeSentSeries(rand(hashStr(active.name)),12,0.55)));
+    highlightChip(entityChips.firstElementChild);
+  }
+  function highlightChip(el){
+    if(!el) return;
+    $$(".pill2", entityChips).forEach(x=>{ x.style.borderColor="rgba(255,255,255,.16)"; x.style.background="rgba(255,255,255,.04)"; });
+    el.style.borderColor="rgba(125,211,252,.34)";
+    el.style.background="linear-gradient(135deg, rgba(125,211,252,.14), rgba(167,139,250,.10))";
+  }
+  function renderSentiment(){
+    const src = sentimentSource.value;
+    const series = sentimentSeriesForScope(selectedState, src);
+    sentLine.setAttribute("points", seriesToPolyline(series));
+    const avg = series.reduce((a,b)=>a+b,0)/series.length;
+    const vol = Math.sqrt(series.map(v=>(v-avg)*(v-avg)).reduce((a,b)=>a+b,0)/series.length);
+    sentDriver.textContent = pick(rand(hashStr(selectedState+src+"drv")), ["Housing debate","Budget pressure","Policing policy","Water constraints","Transit funding","Procurement oversight"]);
+    sentVol.textContent = (vol*100).toFixed(1) + "%";
+  }
+  function renderVotingPatterns(){
+    const city = voteCitySel.value || "";
+    const seed = hashStr(selectedState + "|" + city);
+    const r = rand(seed);
+    const issues = ["Housing","Budget","Public Safety","Transit"];
+    const cityRec = (mock?.cities||[]).find(c=>c.state===selectedState && c.city===city);
+    const roster = cityRec?.council || makeCouncilRoster(r);
 
-      const lastChecked = el("lastChecked");
-      const liveDot = el("liveDot");
-
-      const statMeetings = el("statMeetings");
-      const statMeetingsHint = el("statMeetingsHint");
-      const statCities = el("statCities");
-      const statCitiesBadge = el("statCitiesBadge");
-      const statAgendas = el("statAgendas");
-      const statAgendaBadge = el("statAgendaBadge");
-      const statNext = el("statNext");
-      const statNextHint = el("statNextHint");
-      const statRange = el("statRange");
-
-      const resultsCount = el("resultsCount");
-      const citiesCount = el("citiesCount");
-      const list = el("list");
-      const empty = el("empty");
-      const error = el("error");
-      const errorMsg = el("errorMsg");
-
-      const q = el("q");
-      const citySel = el("city");
-      const sourceSel = el("source");
-      const sortSel = el("sort");
-
-      const btnRefresh = el("btnRefresh");
-
-      const chipAll = el("chipAll");
-      const chip7 = el("chip7");
-      const chip30 = el("chip30");
-      const chipAgenda = el("chipAgenda");
-      const chipSummaries = el("chipSummaries");
-      const chipReset = el("chipReset");
-
-      const barsCities = el("barsCities");
-      const barsProviders = el("barsProviders");
-
-      // --- State ---
-      let raw = null;
-      let meetings = [];
-      let filters = {
-        q: "",
-        city: "",
-        source: "",
-        sort: "date_asc",
-        rangeDays: "all",  // "all" | "7" | "30"
-        onlyAgenda: false,
-        onlySummary: false
-      };
-
-      // --- Helpers ---
-      function safeText(v){
-        if(v === null || v === undefined) return "";
-        return String(v);
+    voteTable.innerHTML = `<thead><tr><th>Member</th>${issues.map(x=>`<th>${esc(x)}</th>`).join("")}<th>Notes</th></tr></thead>`;
+    const tbody = document.createElement("tbody");
+    for(const mem of roster.slice(0,9)){
+      const cells = issues.map(issue=>{
+        const v = r();
+        const label = (v>0.62) ? "Aye" : (v<0.34) ? "Nay" : "Absent";
+        const cls = (label==="Aye") ? "aye" : (label==="Nay") ? "nay" : "abs";
+        return `<td title="Demo: alignment on ${esc(issue)}"><span class="vote ${cls}"></span>${esc(label)}</td>`;
+      }).join("");
+      const note = pick(r, ["Consistent","Swing","Bloc A","Bloc B","Issue-dependent"]);
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td><span class="badge">${esc(mem)}</span></td>${cells}<td class="muted">${esc(note)}</td>`;
+      tbody.appendChild(tr);
+    }
+    voteTable.appendChild(tbody);
+  }
+  function renderArchive(){
+    const term = String(archiveSearch.value||"").trim().toLowerCase();
+    const meetings = meetingsForState(selectedState);
+    const records=[];
+    for(const m of meetings.slice(0,18)){
+      for(const r of (m.archive?.results||[]).slice(0,3)){
+        records.push({ ...r, city:m.city, topic:m.topic||"Topic", state:m.state });
       }
+    }
+    let view = records;
+    if(term) view = view.filter(r=> (r.title+" "+r.city+" "+r.topic).toLowerCase().includes(term));
+    view.sort((a,b)=> (a.date<b.date?1:-1));
+    view = view.slice(0,6);
 
-      function normalizeSpaces(s){
-        return safeText(s).replace(/\\s+/g, " ").trim();
-      }
-
-      function parseDateOnlyYYYYMMDD(dateStr){
-        // dateStr like "2026-01-27"
-        const m = /^\\s*(\\d{4})-(\\d{2})-(\\d{2})\\s*$/.exec(safeText(dateStr));
-        if(!m) return null;
-        const y = Number(m[1]), mo = Number(m[2]), d = Number(m[3]);
-        // Create at noon local to avoid DST edge weirdness
-        return new Date(y, mo - 1, d, 12, 0, 0, 0);
-      }
-
-      function parseStartTimeToMinutes(s){
-        // Accept "9:00 AM", "07:00 PM", "7:00 PM", maybe null
-        s = normalizeSpaces(s);
-        if(!s) return null;
-        // Handle "HH:MM AM/PM"
-        const m = /^(\\d{1,2})(?::(\\d{2}))?\\s*(AM|PM)$/i.exec(s);
-        if(!m) return null;
-        let hh = Number(m[1]);
-        const mm = Number(m[2] || "0");
-        const ap = m[3].toUpperCase();
-        if(ap === "PM" && hh !== 12) hh += 12;
-        if(ap === "AM" && hh === 12) hh = 0;
-        return hh * 60 + mm;
-      }
-
-      function dateKey(d){
-        // YYYY-MM-DD for a Date object
-        const y = d.getFullYear();
-        const m = String(d.getMonth()+1).padStart(2, "0");
-        const day = String(d.getDate()).padStart(2, "0");
-        return `${y}-${m}-${day}`;
-      }
-
-      function fmtHumanDate(dateStr){
-        const d = parseDateOnlyYYYYMMDD(dateStr);
-        if(!d) return safeText(dateStr);
-        return d.toLocaleDateString(undefined, { weekday:"short", year:"numeric", month:"short", day:"numeric" });
-      }
-
-      function isWithinDays(dateStr, days){
-        if(days === "all") return true;
-        const d = parseDateOnlyYYYYMMDD(dateStr);
-        if(!d) return true;
-        const now = new Date();
-        const start = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0,0,0,0);
-        const end = new Date(start.getTime() + Number(days) * 24*60*60*1000);
-        return d >= start && d <= end;
-      }
-
-      function hasAgenda(m){
-        return !!normalizeSpaces(m.agenda_url);
-      }
-
-      function hasSummary(m){
-        return Array.isArray(m.agenda_summary) && m.agenda_summary.length > 0;
-      }
-
-      function deriveSourceLabel(m){
-        // Prefer provider when present; fall back to hostname from source URL
-        const prov = normalizeSpaces(m.provider);
-        if(prov) return prov;
-        const src = normalizeSpaces(m.source);
-        if(!src) return "Unknown";
-        try{
-          const u = new URL(src);
-          // Keep short-ish: "legistar.com" -> "legistar"
-          return u.hostname.replace(/^www\\./,"");
-        }catch(_){
-          return "Unknown";
-        }
-      }
-
-      function cleanMeetingType(m){
-        // Some sources return long run-on strings. Try to extract a readable tail.
-        let t = normalizeSpaces(m.meeting_type);
-        if(!t) t = normalizeSpaces(m.body) || "Meeting";
-        // Common endings we care about
-        const candidates = [
-          "City Council Regular Meeting",
-          "City Council Meeting",
-          "City Council Work Session",
-          "Work Session",
-          "Regular Meeting",
-          "Special Meeting",
-          "Board of County Commissioners",
-          "Board of County Commissioners Meeting"
-        ];
-        for(const c of candidates){
-          if(t.includes(c)) return c;
-        }
-
-        // CivicClerk run-on: try to pull the last "Meeting" phrase
-        const idx = t.lastIndexOf("Meeting");
-        if(idx > 10){
-          const tail = t.slice(Math.max(0, idx - 30), idx + "Meeting".length);
-          // If tail has "Council" or "Commission" etc, use a bit more
-          const j = t.lastIndexOf("City Council", idx);
-          if(j >= 0) return normalizeSpaces(t.slice(j, Math.min(t.length, j + 40)));
-          return normalizeSpaces(t.slice(Math.max(0, idx - 20), Math.min(t.length, idx + 20)));
-        }
-
-        // Fallback: cap
-        if(t.length > 64) return t.slice(0, 61) + "…";
-        return t || "Meeting";
-      }
-
-      function computeSortableMoment(m){
-        // Use date + time when available. Otherwise date only.
-        const d = parseDateOnlyYYYYMMDD(m.date);
-        if(!d) return Number.POSITIVE_INFINITY;
-        const mins = parseStartTimeToMinutes(m.start_time_local);
-        if(mins !== null){
-          const hh = Math.floor(mins/60);
-          const mm = mins%60;
-          d.setHours(hh, mm, 0, 0);
-        }
-        return d.getTime();
-      }
-
-      function escHtml(s){
-        return safeText(s)
-          .replace(/&/g,"&amp;")
-          .replace(/</g,"&lt;")
-          .replace(/>/g,"&gt;")
-          .replace(/"/g,"&quot;")
-          .replace(/'/g,"&#039;");
-      }
-
-      function setChip(chip, on){
-        chip.setAttribute("aria-pressed", on ? "true" : "false");
-      }
-
-      function pickRangeChip(days){
-        setChip(chipAll, days === "all");
-        setChip(chip7, days === "7");
-        setChip(chip30, days === "30");
-      }
-
-      // --- Render ---
-      function renderBars(container, entries, total){
-        // entries: [{name, count}]
-        container.innerHTML = "";
-        const max = Math.max(1, ...entries.map(e => e.count));
-        for(const e of entries){
-          const pct = Math.round((e.count / max) * 100);
-          const row = document.createElement("div");
-          row.className = "barrow";
-          row.innerHTML = `
-            <div class="name">
-              <span>${escHtml(e.name)}</span>
-              <span class="badge">${e.count}</span>
+    archiveResults.innerHTML = "";
+    if(!view.length){
+      archiveResults.innerHTML = `<div class="muted">No archive matches. Try a broader search.</div>`;
+      return;
+    }
+    for(const r of view){
+      const card = document.createElement("div");
+      card.className="card";
+      card.innerHTML = `
+        <div class="card-top">
+          <div class="title">
+            <div class="line1">
+              <span>${esc(r.city)}</span>
+              <span class="tag">${esc(stateName(r.state))}</span>
+              <span class="tag">${esc(r.topic)}</span>
             </div>
-            <div class="barwrap" aria-hidden="true"><div class="bar" style="width:${pct}%"></div></div>
-          `;
-          container.appendChild(row);
-        }
-        if(entries.length === 0){
-          container.innerHTML = `<div class="footnote">No data</div>`;
-        }
-      }
-
-      function renderStats(view){
-        const total = view.length;
-        const cities = new Set(view.map(m => normalizeSpaces(m.city) || "Unknown"));
-        const agendaCount = view.filter(hasAgenda).length;
-        const summaryCount = view.filter(hasSummary).length;
-
-        statMeetings.textContent = String(total);
-        statMeetingsHint.textContent = `${agendaCount} with agendas • ${summaryCount} with summaries`;
-
-        statCities.textContent = String(cities.size);
-        statCitiesBadge.textContent = `${cities.size}`;
-
-        statAgendas.textContent = `${agendaCount}`;
-        statAgendaBadge.textContent = `${Math.round((agendaCount / Math.max(1,total)) * 100)}%`;
-
-        // Next meeting (soonest overall from full feed, not filtered by text query)
-        const sorted = [...view].sort((a,b)=> computeSortableMoment(a) - computeSortableMoment(b));
-        const next = sorted[0];
-        if(next){
-          statNext.textContent = `${normalizeSpaces(next.city) || "Unknown"}`;
-          statNextHint.textContent = `${fmtHumanDate(next.date)} • ${normalizeSpaces(next.start_time_local) || "Time TBA"} • ${cleanMeetingType(next)}`;
-        }else{
-          statNext.textContent = "—";
-          statNextHint.textContent = "—";
-        }
-      }
-
-      function renderList(view){
-        list.innerHTML = "";
-        empty.classList.add("hidden");
-
-        if(view.length === 0){
-          empty.classList.remove("hidden");
-          resultsCount.textContent = "0 results";
-          citiesCount.textContent = "0 cities";
-          return;
-        }
-
-        const citySet = new Set(view.map(m => normalizeSpaces(m.city) || "Unknown"));
-        resultsCount.textContent = `${view.length} results`;
-        citiesCount.textContent = `${citySet.size} cities`;
-
-        for(const m of view){
-          const city = normalizeSpaces(m.city) || "Unknown";
-          const body = normalizeSpaces(m.body);
-          const type = cleanMeetingType(m);
-          const when = fmtHumanDate(m.date);
-          const time = normalizeSpaces(m.start_time_local) || "Time TBA";
-          const status = normalizeSpaces(m.status) || "Scheduled";
-          const loc = normalizeSpaces(m.location);
-          const agendaUrl = normalizeSpaces(m.agenda_url);
-          const src = normalizeSpaces(m.source);
-          const details = normalizeSpaces(m.url); // some providers include url to meeting page/files
-
-          const provider = deriveSourceLabel(m);
-
-          const summary = Array.isArray(m.agenda_summary) ? m.agenda_summary : [];
-          const summaryShort = summary.slice(0, 6);
-          const hasMore = summary.length > summaryShort.length;
-
-          const tagAgenda = hasAgenda(m) ? `<span class="tag good">Agenda</span>` : `<span class="tag warn">No agenda</span>`;
-          const tagSummary = hasSummary(m) ? `<span class="tag good">Summary</span>` : `<span class="tag">No summary</span>`;
-
-          const card = document.createElement("article");
-          card.className = "card";
-          card.innerHTML = `
-            <div class="card-top">
-              <div class="title">
-                <div class="line1">
-                  <span>${escHtml(city)}</span>
-                  <span class="tag">${escHtml(type)}</span>
-                  ${body ? `<span class="tag">${escHtml(body)}</span>` : ``}
-                </div>
-                <div class="line2">
-                  <span class="tag">${escHtml(when)}</span>
-                  <span class="tag">${escHtml(time)}</span>
-                  <span class="tag">${escHtml(status)}</span>
-                  <span class="tag">${escHtml(provider)}</span>
-                  ${loc ? `<span class="tag" title="${escHtml(loc)}">Location</span>` : ``}
-                </div>
-              </div>
-
-              <div class="actions">
-                ${tagAgenda}
-                ${tagSummary}
-                ${agendaUrl ? `<a class="btn mini" href="${escHtml(agendaUrl)}" target="_blank" rel="noopener">Agenda</a>` : ``}
-                ${details ? `<a class="btn mini" href="${escHtml(details)}" target="_blank" rel="noopener">Details</a>` : ``}
-                ${src ? `<a class="btn mini" href="${escHtml(src)}" target="_blank" rel="noopener">Source</a>` : ``}
-              </div>
+            <div class="line2">
+              <span class="tag">${esc(fmtHuman(r.date))}</span>
+              <span class="tag">${r.hasMinutes ? "Minutes" : "No minutes"}</span>
+              <span class="tag">${r.hasTranscript ? "Transcript" : "No transcript"}</span>
             </div>
+          </div>
+          <div class="actions">
+            <span class="tag ${r.hasAgenda ? "good" : ""}">Agenda</span>
+            <span class="tag ${r.hasMinutes ? "good" : ""}">Minutes</span>
+            <span class="tag ${r.hasTranscript ? "good" : ""}">Transcript</span>
+          </div>
+        </div>
+        <div class="card-body">
+          <div class="summary">
+            <div><strong>${esc(r.title)}</strong></div>
+            <div class="muted" style="margin-top:6px;">${esc(r.outcome)}</div>
+          </div>
+        </div>
+      `;
+      archiveResults.appendChild(card);
+    }
+  }
+  function renderAnalytics(){
+    analyticsScope.textContent = `Scope: ${stateName(selectedState)} (${selectedState})`;
+    renderEntityTracker();
+    renderSentiment();
+    renderVotingPatterns();
+    renderArchive();
+  }
 
-            <div class="card-body">
-              <div class="summary">
-                ${
-                  summaryShort.length
-                    ? `<ul>${summaryShort.map(x => `<li>${escHtml(normalizeSpaces(x))}</li>`).join("")}</ul>`
-                    : `<div class="muted">No summary yet for this meeting in the current feed.</div>`
-                }
-                ${
-                  hasMore
-                    ? `<div style="margin-top:10px;">
-                         <button class="btn mini" type="button" data-action="expand">Show all ${summary.length} bullets</button>
-                       </div>`
-                    : ``
-                }
-              </div>
-              <div class="footnote">
-                ${agendaUrl ? `Agenda summary source: <span class="badge">${escHtml(normalizeSpaces(m.agenda_summary_source || "")) || "—"}</span>` : ``}
-              </div>
-            </div>
-          `;
+  function updateNationalKPIs(){
+    kpiCities.textContent = formatCompact(mock.kpis.citiesCovered);
+    kpiMeetings30.textContent = formatCompact(mock.kpis.meetings30d);
+    kpiEntities.textContent = formatCompact(mock.kpis.entitiesTracked);
+  }
+  function updateScopeKPIs(){
+    const coMeet = getLiveMeetingsCO();
+    kpiCoCount.textContent = String(coMeet.length);
+    const agendaCount = coMeet.filter(m=>!!String(m.agenda_url||"").trim()).length;
+    kpiCoHint.textContent = `${agendaCount} with agenda links • ${liveCO.last_checked_mt ? "updated " + liveCO.last_checked_mt : "update time unknown"}`;
+  }
 
-          // Expand/collapse summary
-          if(hasMore){
-            const btn = card.querySelector('button[data-action="expand"]');
-            btn.addEventListener("click", () => {
-              const ul = card.querySelector(".summary ul");
-              if(!ul) return;
-              ul.innerHTML = summary.map(x => `<li>${escHtml(normalizeSpaces(x))}</li>`).join("");
-              btn.remove();
-            });
-          }
-
-          list.appendChild(card);
-        }
+  function setFreshnessIndicator(lastStr){
+    lastChecked.textContent = lastStr || "—";
+    try{
+      const m = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/.exec(lastStr || "");
+      if(m){
+        const d = new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
+        const ageMs = Date.now() - d.getTime();
+        const twelveH = 12*60*60*1000;
+        liveDot.classList.toggle("good", ageMs >= 0 && ageMs <= twelveH);
+      }else{
+        liveDot.classList.remove("good");
       }
+    }catch(_){ liveDot.classList.remove("good"); }
+  }
 
-      function getFilteredView(){
-        let view = meetings.slice();
+  q.addEventListener("input", ()=>{ filters.q=q.value; renderFeed(); });
+  stateSel.addEventListener("change", ()=> setSelectedState(stateSel.value));
+  citySel.addEventListener("change", ()=>{ selectedCity=citySel.value; renderFeed(); renderAnalytics(); });
+  sortSel.addEventListener("change", ()=>{ filters.sort=sortSel.value; renderFeed(); });
 
-        // range days
-        view = view.filter(m => isWithinDays(m.date, filters.rangeDays));
+  function setRange(days){
+    filters.rangeDays=days;
+    setChip(chip7, days==="7");
+    setChip(chip30, days==="30");
+    setChip(chipAll, days==="all");
+  }
+  chip7.addEventListener("click", ()=>{ setRange("7"); renderFeed(); });
+  chip30.addEventListener("click", ()=>{ setRange("30"); renderFeed(); });
+  chipAll.addEventListener("click", ()=>{ setRange("all"); renderFeed(); });
+  chipAgenda.addEventListener("click", ()=>{ filters.onlyAgenda=!filters.onlyAgenda; setChip(chipAgenda, filters.onlyAgenda); renderFeed(); });
+  chipTranscript.addEventListener("click", ()=>{ filters.onlyTranscript=!filters.onlyTranscript; setChip(chipTranscript, filters.onlyTranscript); renderFeed(); });
+  chipVotes.addEventListener("click", ()=>{ filters.onlyVotes=!filters.onlyVotes; setChip(chipVotes, filters.onlyVotes); renderFeed(); });
 
-        // only with agenda / summary
-        if(filters.onlyAgenda) view = view.filter(hasAgenda);
-        if(filters.onlySummary) view = view.filter(hasSummary);
+  function resetAll(){
+    q.value=""; filters.q="";
+    filters.sort="date_asc"; sortSel.value="date_asc";
+    setRange("7");
+    filters.onlyAgenda=false; filters.onlyTranscript=false; filters.onlyVotes=false;
+    setChip(chipAgenda,false); setChip(chipTranscript,false); setChip(chipVotes,false);
+    selectedCity=""; citySel.value="";
+    renderFeed(); renderAnalytics();
+  }
+  chipReset.addEventListener("click", resetAll);
 
-        // city/source
-        if(filters.city) view = view.filter(m => normalizeSpaces(m.city) === filters.city);
-        if(filters.source) view = view.filter(m => deriveSourceLabel(m) === filters.source);
+  entitySearch.addEventListener("input", renderEntityTracker);
+  sentimentSource.addEventListener("change", ()=>{ renderSentiment(); applyMapMode(); });
+  voteCitySel.addEventListener("change", renderVotingPatterns);
+  archiveSearch.addEventListener("input", renderArchive);
 
-        // text query
-        const term = normalizeSpaces(filters.q).toLowerCase();
-        if(term){
-          view = view.filter(m => {
-            const hay = [
-              m.city,
-              m.body,
-              m.city_or_body,
-              m.meeting_type,
-              m.status,
-              m.location,
-              deriveSourceLabel(m),
-              ...(Array.isArray(m.agenda_summary) ? m.agenda_summary : [])
-            ].map(normalizeSpaces).join(" • ").toLowerCase();
-            return hay.includes(term);
-          });
-        }
+  btnRefresh.addEventListener("click", ()=> loadLiveCO());
+  jumpMeetings.addEventListener("click", ()=> $("meetingsPanel").scrollIntoView({behavior:"smooth", block:"start"}));
+  jumpAnalytics.addEventListener("click", ()=> $("analyticsPanel").scrollIntoView({behavior:"smooth", block:"start"}));
+  btnCreateAlert.addEventListener("click", ()=> openAlertDemo());
 
-        // sort
-        if(filters.sort === "date_asc"){
-          view.sort((a,b)=> computeSortableMoment(a) - computeSortableMoment(b));
-        }else if(filters.sort === "date_desc"){
-          view.sort((a,b)=> computeSortableMoment(b) - computeSortableMoment(a));
-        }else if(filters.sort === "city_asc"){
-          view.sort((a,b)=> normalizeSpaces(a.city).localeCompare(normalizeSpaces(b.city)) || (computeSortableMoment(a)-computeSortableMoment(b)));
-        }
+  $$(".mode").forEach(m=>{
+    m.addEventListener("click", ()=>{
+      mapMode = m.dataset.mapmode;
+      $$(".mode").forEach(x=>x.setAttribute("aria-pressed", x.dataset.mapmode===mapMode ? "true":"false"));
+      applyMapMode();
+    });
+  });
 
-        return view;
-      }
+  function openAlertDemo(){
+    modalTitle.textContent = "Create alert (demo)";
+    modalSub.textContent = "Notify me when an entity or keyword appears in a new agenda or transcript.";
+    modalAgendaBtn.classList.add("hidden"); modalAgendaBtn.href="#";
+    tabBrief.innerHTML = `
+      <div class="mini-panel">
+        <div class="mini-head"><h4>Alert builder</h4><span class="badge">Demo</span></div>
+        <div class="mini-body">
+          <div class="field" style="margin-bottom:10px;"><label>Keyword</label><input id="alertKeyword" type="search" placeholder="e.g., zoning, Airbnb, Ordinance 23-117"/></div>
+          <div class="field" style="margin-bottom:10px;"><label>Scope</label>
+            <select id="alertScope">
+              <option>My saved view: Colorado Watchlist</option>
+              <option>All major US cities (demo)</option>
+              <option>${esc(stateName(selectedState))} (${esc(selectedState)})</option>
+            </select>
+          </div>
+          <div class="pillbox" style="margin-bottom:10px;">
+            <span class="pill2">Email</span><span class="pill2">Slack</span><span class="pill2">SMS</span><span class="pill2">Webhook</span>
+          </div>
+          <button class="btn primary" type="button" id="alertSave">Save alert</button>
+          <div class="footnote" style="margin-top:10px;">Demo: alerts include AI summaries + “why this matters” context.</div>
+        </div>
+      </div>
+    `;
+    tabEntities.innerHTML=""; tabVotes.innerHTML=""; tabArchive.innerHTML="";
+    setActiveTab("brief");
+    overlay.classList.add("open");
+    setTimeout(()=>{
+      const btn = document.getElementById("alertSave");
+      btn?.addEventListener("click", ()=>{ btn.textContent="Saved ✓"; btn.disabled=true; });
+    },0);
+  }
 
-      function renderAll(){
-        const view = getFilteredView();
-        renderStats(view);
-        renderList(view);
+  async function loadLiveCO(){
+    if(selectedState==="CO"){
+      feed.innerHTML = `<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`;
+    }
+    try{
+      const url = FEED_URL + (FEED_URL.includes("?") ? "&" : "?") + "v=" + Date.now();
+      const res = await fetch(url, { cache:"no-store" });
+      if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      const data = await res.json();
+      liveCO = { last_checked_mt: normalizeSpaces(data.last_checked_mt), meetings: Array.isArray(data.meetings) ? data.meetings : [] };
+      setFreshnessIndicator(liveCO.last_checked_mt);
+      error.classList.add("hidden");
+      errorMsg.textContent="";
+    }catch(e){
+      console.error(e);
+      error.classList.remove("hidden");
+      errorMsg.textContent = String(e?.message || e);
+      setFreshnessIndicator("");
+    }
+    updateScopeKPIs();
+    if(selectedState==="CO"){ renderFeed(); renderAnalytics(); }
+  }
 
-        // range badge
-        statRange.textContent = filters.rangeDays === "all" ? "All" : `${filters.rangeDays}d`;
-
-        // coverage bars based on FULL feed (not filtered), but could be filtered if desired
-        const countsByCity = {};
-        const countsByProv = {};
-        for(const m of meetings){
-          const c = normalizeSpaces(m.city) || "Unknown";
-          const p = deriveSourceLabel(m);
-          countsByCity[c] = (countsByCity[c] || 0) + 1;
-          countsByProv[p] = (countsByProv[p] || 0) + 1;
-        }
-        const topCities = Object.entries(countsByCity)
-          .map(([name, count]) => ({name, count}))
-          .sort((a,b)=> b.count - a.count)
-          .slice(0, 6);
-
-        const topProv = Object.entries(countsByProv)
-          .map(([name, count]) => ({name, count}))
-          .sort((a,b)=> b.count - a.count)
-          .slice(0, 6);
-
-        renderBars(barsCities, topCities, meetings.length);
-        renderBars(barsProviders, topProv, meetings.length);
-
-        // header badges
-        const citySet = new Set(view.map(m => normalizeSpaces(m.city) || "Unknown"));
-        resultsCount.textContent = `${view.length} results`;
-        citiesCount.textContent = `${citySet.size} cities`;
-      }
-
-      function fillSelects(){
-        // Cities / sources from full feed
-        const citySet = new Set(meetings.map(m => normalizeSpaces(m.city)).filter(Boolean));
-        const sources = new Set(meetings.map(m => deriveSourceLabel(m)).filter(Boolean));
-
-        const cities = Array.from(citySet).sort((a,b)=> a.localeCompare(b));
-        const srcs = Array.from(sources).sort((a,b)=> a.localeCompare(b));
-
-        // Preserve selection if possible
-        const prevCity = citySel.value;
-        const prevSrc = sourceSel.value;
-
-        citySel.innerHTML = `<option value="">All</option>` + cities.map(c => `<option value="${escHtml(c)}">${escHtml(c)}</option>`).join("");
-        sourceSel.innerHTML = `<option value="">All</option>` + srcs.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join("");
-
-        if(prevCity && cities.includes(prevCity)) citySel.value = prevCity;
-        if(prevSrc && srcs.includes(prevSrc)) sourceSel.value = prevSrc;
-      }
-
-      function setFreshnessIndicator(lastCheckedStr){
-        lastChecked.textContent = lastCheckedStr || "—";
-        // If within last 12 hours, mark green
-        try{
-          // Format in feed appears like "YYYY-MM-DD HH:MM"
-          const m = /^(\\d{4})-(\\d{2})-(\\d{2})\\s+(\\d{2}):(\\d{2})/.exec(lastCheckedStr || "");
-          if(m){
-            const d = new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
-            const ageMs = Date.now() - d.getTime();
-            const twelveH = 12*60*60*1000;
-            liveDot.classList.toggle("good", ageMs >= 0 && ageMs <= twelveH);
-          }else{
-            liveDot.classList.remove("good");
-          }
-        }catch(_){
-          liveDot.classList.remove("good");
-        }
-      }
-
-      async function load(){
-        error.classList.add("hidden");
-        empty.classList.add("hidden");
-        list.innerHTML = `<div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>`;
-
-        try{
-          // cache buster for GitHub Pages caching
-          const url = FEED_URL + (FEED_URL.includes("?") ? "&" : "?") + "v=" + Date.now();
-          const res = await fetch(url, { cache: "no-store" });
-          if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
-          raw = await res.json();
-
-          const last = normalizeSpaces(raw.last_checked_mt);
-          setFreshnessIndicator(last);
-
-          meetings = Array.isArray(raw.meetings) ? raw.meetings : [];
-          // Defensive normalization to avoid runtime errors
-          meetings = meetings.map(m => ({
-            city: m.city ?? "",
-            body: m.body ?? "",
-            city_or_body: m.city_or_body ?? "",
-            meeting_type: m.meeting_type ?? "",
-            date: m.date ?? "",
-            start_time_local: m.start_time_local ?? "",
-            status: m.status ?? "",
-            location: m.location ?? "",
-            agenda_url: m.agenda_url ?? "",
-            agenda_summary: Array.isArray(m.agenda_summary) ? m.agenda_summary : [],
-            agenda_summary_source: m.agenda_summary_source ?? "",
-            source: m.source ?? "",
-            provider: m.provider ?? "",
-            tz: m.tz ?? "",
-            url: m.url ?? ""
-          }));
-
-          fillSelects();
-          renderAll();
-
-        }catch(e){
-          console.error(e);
-          error.classList.remove("hidden");
-          errorMsg.textContent = String(e && e.message ? e.message : e);
-          list.innerHTML = "";
-          resultsCount.textContent = "— results";
-          citiesCount.textContent = "— cities";
-          statMeetings.textContent = "—";
-          statCities.textContent = "—";
-          statAgendas.textContent = "—";
-          statNext.textContent = "—";
-          statMeetingsHint.textContent = "Unable to load feed";
-          statNextHint.textContent = "—";
-          setFreshnessIndicator("");
-        }
-      }
-
-      // --- Events ---
-      q.addEventListener("input", () => { filters.q = q.value; renderAll(); });
-      citySel.addEventListener("change", () => { filters.city = citySel.value; renderAll(); });
-      sourceSel.addEventListener("change", () => { filters.source = sourceSel.value; renderAll(); });
-      sortSel.addEventListener("change", () => { filters.sort = sortSel.value; renderAll(); });
-
-      function resetAll(){
-        filters = {
-          q: "",
-          city: "",
-          source: "",
-          sort: "date_asc",
-          rangeDays: "all",
-          onlyAgenda: false,
-          onlySummary: false
-        };
-        q.value = "";
-        citySel.value = "";
-        sourceSel.value = "";
-        sortSel.value = "date_asc";
-        pickRangeChip("all");
-        setChip(chipAgenda, false);
-        setChip(chipSummaries, false);
-        renderAll();
-      }
-
-      chipAll.addEventListener("click", () => {
-        filters.rangeDays = "all";
-        pickRangeChip("all");
-        renderAll();
-      });
-      chip7.addEventListener("click", () => {
-        filters.rangeDays = "7";
-        pickRangeChip("7");
-        renderAll();
-      });
-      chip30.addEventListener("click", () => {
-        filters.rangeDays = "30";
-        pickRangeChip("30");
-        renderAll();
-      });
-
-      chipAgenda.addEventListener("click", () => {
-        filters.onlyAgenda = !filters.onlyAgenda;
-        setChip(chipAgenda, filters.onlyAgenda);
-        renderAll();
-      });
-
-      chipSummaries.addEventListener("click", () => {
-        filters.onlySummary = !filters.onlySummary;
-        setChip(chipSummaries, filters.onlySummary);
-        renderAll();
-      });
-
-      chipReset.addEventListener("click", () => resetAll());
-
-      btnRefresh.addEventListener("click", () => load());
-
-      // Boot
-      load();
-    })();
-  </script>
+  function boot(){
+    mock = makeMockData();
+    updateNationalKPIs();
+    setRange("7");
+    setChip(chipAgenda,false); setChip(chipTranscript,false); setChip(chipVotes,false);
+    refreshSelectors();
+    renderMap();
+    renderAnalytics();
+    renderFeed();
+    loadLiveCO();
+  }
+  boot();
+})();</script>
 </body>
 </html>

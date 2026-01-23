@@ -1638,7 +1638,7 @@
     try{
       const url = FEED_URL + (FEED_URL.includes("?") ? "&" : "?") + "v=" + Date.now();
       const res = await fetch(url, { cache:"no-store" });
-      if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+      if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} - ${url}`);
       const data = await res.json();
 
       // ROBUST: ensure structure
@@ -1655,7 +1655,7 @@
     }catch(e){
       console.error("Live feed error:", e);
       error.classList.remove("hidden");
-      errorMsg.textContent = String(e?.message || e);
+      errorMsg.innerHTML = `<strong>Error loading feed:</strong><br/>${String(e?.message || e)}<br/><br/>Try manually checking: <a href="${FEED_URL}" target="_blank" style="text-decoration:underline;color:inherit">${FEED_URL}</a>`;
       setFreshnessIndicator("");
     }
     updateScopeKPIs();

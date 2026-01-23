@@ -170,6 +170,7 @@ jobs:
         run: |
           mkdir -p _site
           cp -r data _site/
+          touch _site/.nojekyll
           
       - name: Add demo.html to published site
         run: |

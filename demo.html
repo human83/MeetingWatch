@@ -768,7 +768,7 @@
     let s = seed >>> 0;
     return function(){
       s = (1664525 * s + 1013904223) >>> 0;
-      return (s & 0xFFFFFFFF) / 0x100000000;
+      return s / 4294967296;
     };
   }
   const pick = (r, arr)=>arr[Math.floor(r()*arr.length)];
@@ -1085,13 +1085,20 @@
         div.className = `st ${coverageClass(abbr)} ${abbr===selectedState ? "selected" : ""}`;
         div.textContent = abbr;
         div.dataset.state = abbr;
+        div.setAttribute("role", "button");
+        div.setAttribute("tabindex", "0");
+        div.setAttribute("aria-label", `Select state: ${stateName(abbr)}`);
 
         const tt = document.createElement("div");
         tt.className="tt";
         tt.innerHTML = stateTooltip(abbr);
         div.appendChild(tt);
 
-        div.addEventListener("click", ()=> setSelectedState(abbr));
+        const select = ()=> setSelectedState(abbr);
+        div.addEventListener("click", select);
+        div.addEventListener("keydown", (e)=>{
+          if(e.key==="Enter" || e.key===" ") { e.preventDefault(); select(); }
+        });
         gridmap.appendChild(div);
       }
     }

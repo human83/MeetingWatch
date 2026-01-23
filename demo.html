@@ -623,7 +623,6 @@
 
 <script>
 (()=>{ "use strict";
-  // UPDATED: use relative path for portability (safe for GitHub Pages or local preview)
   const FEED_URL = "./data/meetings.json";
   
   const $ = (id)=>document.getElementById(id);
@@ -699,12 +698,12 @@
   ];
 
   const normalizeSpaces = (s)=>String(s??"").replace(/\s+/g," ").trim();
-  const stateName = (abbr)=> (STATES.find(x=>x[0]===abbr)?.[1] || abbr);
+  const stateName = (abbr)=> (STATES.find(x=> x && x[0]===abbr)?.[1] || abbr);
   const setChip = (el,on)=>el.setAttribute("aria-pressed", on?"true":"false");
 
   function parseDateOnly(s){
     // RELAXED regex to handle single-digit months/days better
-    const m = /^\s*(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(s||"").trim());
+    const m = /^\s*(\d{4})-(\d{1,2})-(\d{1,2})/ .exec(String(s||"").trim());
     if(!m) return null;
     return new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), 12, 0, 0, 0);
   }
@@ -812,10 +811,10 @@
     const k1 = pick(r, keywords);
     const k2 = pick(r, keywords);
     const bullets = [
-      `Consideration of ${topic.toLowerCase()} package; staff recommends phased adoption and impact review.`,
-      `Public comment expected regarding ${k1} and neighborhood impacts; outreach summary included.`,
-      `Council to review amendment language referencing ${e1}; legal notes provided.`,
-      `Budget implication: preliminary estimate and funding options for ${k2}.`,
+      `Consideration of ${topic.toLowerCase()} package; staff recommends phased adoption and impact review.`, 
+      `Public comment expected regarding ${k1} and neighborhood impacts; outreach summary included.`, 
+      `Council to review amendment language referencing ${e1}; legal notes provided.`, 
+      `Budget implication: preliminary estimate and funding options for ${k2}.`, 
       `Next steps include vote on motion and scheduling of follow-up hearing for ${e2}.`
     ];
     return bullets.slice(0, 4 + Math.floor(r()*2));
@@ -858,11 +857,13 @@
     const now = new Date();
 
     const stateCoverage = {};
-    for(const [abbr] of STATES){
+    for(const row of STATES){
+      if(!row || !row[0]) continue;
+      const abbr = row[0];
       stateCoverage[abbr] = (abbr==="CO") ? 4 : (1 + Math.floor(r()*4));
     }
 
-    const cities = MAJOR_CITIES.map((c)=>{
+    const cities = MAJOR_CITIES.filter(x=>x).map((c)=>{
       const [st, name, body] = c;
       const localR = rand(hashStr(st+"|"+name));
       const providers=["Legistar","CivicClerk","AgendaSuite","Granicus","City Portal"];
@@ -956,9 +957,10 @@
   function extractEntitiesFromLive(meet){
     const text = [meet.city, meet.body, meet.meeting_type, ...(meet.summary||[])].join(" • ");
     const keep = new Set();
-    const ord = text.match(/(Ordinance|Resolution|Bill)\s*\d{1,4}[-–]\d{1,4}/gi) || [];
+    // SAFE REGEX: Avoid potential confusion with backspace char
+    const ord = text.match(new RegExp("\\b(Ordinance|Resolution|Bill)\\s*\\d{1,4}[-–]\\d{1,4}\\b", "gi")) || [];
     ord.forEach(x=>keep.add(x.replace(/\s+/g," ").trim()));
-    const caps = text.match(/[A-Z][a-z]+\s+[A-Z][a-z]+/g) || [];
+    const caps = text.match(new RegExp("\\b[A-Z][a-z]+\\s+[A-Z][a-z]+\\b", "g")) || [];
     caps.slice(0,8).forEach(x=>keep.add(x));
     const kws=["zoning","budget","housing","water","police","transit","annexation","ordinance","tax","bond"];
     kws.forEach(k=>{ if(text.toLowerCase().includes(k)) keep.add(k[0].toUpperCase()+k.slice(1)); });
@@ -988,7 +990,7 @@
       body,
       provider: deriveProvider(m),
       meeting_type: mType,
-      date,
+      date, 
       time,
       status: normalizeSpaces(m.status) || "Scheduled",
       location: normalizeSpaces(m.location) || "",
@@ -1062,7 +1064,7 @@
   function stateTooltip(abbr){
     const name = stateName(abbr);
     const cov = mock?.stateCoverage?.[abbr] ?? 0;
-    const covLabel = ["No data","Limited","Growing","Strong","Full"][cov] || "—";
+    const covLabel = ["No data","Limited","Growing","Strong","Full"].find((_,i)=>i===cov) || "—";
     const ents = topEntitiesForState(abbr, 3).map(e=>e.name);
     const entLine = ents.length ? `Top entities: ${ents.join(", ")}` : "Top entities: —";
     const live = (abbr==="CO") ? "Colorado uses LIVE feed where available." : "Demo dataset for national scale.";
@@ -1099,7 +1101,7 @@
     const cells = $$(".st[data-state]", gridmap);
     for(const c of cells){
       const abbr = c.dataset.state;
-      c.className = c.className.replace(/cov-\d/g,"").trim();
+      c.className = c.className.replace(/\s*cov-\d\s*/g,"").trim();
       const base = (mock?.stateCoverage?.[abbr] ?? 0);
       let v = base;
 
@@ -1392,7 +1394,8 @@
   document.addEventListener("keydown", (e)=>{ if(e.key==="Escape" && overlay.classList.contains("open")) closeModal(); });
   $$(".tab", overlay).forEach(t=>{
     t.addEventListener("click", ()=> setActiveTab(t.dataset.tab));
-    t.addEventListener("keydown", (e)=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); setActiveTab(t.dataset.tab);} });
+    t.addEventListener("keydown", (e)=>{ if(e.key==="Enter" || e.key===" "){ e.preventDefault(); setActiveTab(t.dataset.tab);}
+    });
   });
 
   function renderEntityTracker(){
@@ -1536,7 +1539,7 @@
   function setFreshnessIndicator(lastStr){
     lastChecked.textContent = lastStr || "—";
     try{
-      const m = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/.exec(lastStr || "");
+      const m = /^(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})/ .exec(lastStr || "");
       if(m){
         const d = new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
         const ageMs = Date.now() - d.getTime();

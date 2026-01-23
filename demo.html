@@ -337,7 +337,7 @@
         <span id="modeNote">Colorado selected</span>
       </div>
       <a class="btn small" href="https://human83.github.io/MeetingWatch/" title="Current production homepage">Current site</a>
-      <a class="btn small" href="https://human83.github.io/MeetingWatch/data/meetings.json" title="Raw Colorado feed (meetings.json)">meetings.json</a>
+      <a class="btn small" href="./data/meetings.json" title="Raw Colorado feed (meetings.json)">meetings.json</a>
       <button class="btn primary small" id="btnRefresh" type="button" title="Refresh live feed">Refresh</button>
     </div>
   </div>
@@ -588,7 +588,7 @@
 <footer class="footer">
   <div class="container">
     <div class="hr"></div>
-    Single-file demo • <span class="badge">demo.html</span> • Live feed: <a href="https://human83.github.io/MeetingWatch/data/meetings.json">MeetingWatch/data/meetings.json</a>
+    Single-file demo • <span class="badge">demo.html</span> • Live feed: <a href="./data/meetings.json">MeetingWatch/data/meetings.json</a>
     <div style="margin-top:8px;">Publishing tip: copy <span class="badge">demo.html</span> into <span class="badge">_site/</span> in your workflow before deploy.</div>
   </div>
 </footer>
@@ -623,7 +623,9 @@
 
 <script>
 (()=>{ "use strict";
-  const FEED_URL = "https://human83.github.io/MeetingWatch/data/meetings.json";
+  // UPDATED: use relative path for portability (safe for GitHub Pages or local preview)
+  const FEED_URL = "./data/meetings.json";
+  
   const $ = (id)=>document.getElementById(id);
   const $$ = (sel, root=document)=>Array.from(root.querySelectorAll(sel));
   const esc = (s)=>String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;");
@@ -701,7 +703,8 @@
   const setChip = (el,on)=>el.setAttribute("aria-pressed", on?"true":"false");
 
   function parseDateOnly(s){
-    const m = /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/.exec(String(s||"").trim());
+    // RELAXED regex to handle single-digit months/days better
+    const m = /^\s*(\d{4})-(\d{1,2})-(\d{1,2})/.exec(String(s||"").trim());
     if(!m) return null;
     return new Date(Number(m[1]), Number(m[2])-1, Number(m[3]), 12, 0, 0, 0);
   }
@@ -739,7 +742,10 @@
     return d >= start && d <= end;
   }
   function safeSummary(summary){
+    // ROBUST: handle null, string, or array
+    if(!summary) return [];
     if(Array.isArray(summary)) return summary.filter(Boolean).map(s=>String(s).trim()).filter(Boolean);
+    if(typeof summary === "string") return [summary.trim()].filter(Boolean);
     return [];
   }
   function formatCompact(n){
@@ -967,16 +973,23 @@
   }
   function toCanonicalFromLive(m){
     const city = normalizeSpaces(m.city) || "Colorado";
-    const id = `LIVE-CO-${city.replace(/\s+/g,"")}-${normalizeSpaces(m.date)}-${hashStr(normalizeSpaces(m.meeting_type))}`;
+    const body = normalizeSpaces(m.body);
+    const mType = cleanType(m);
+    const date = normalizeSpaces(m.date);
+    const time = normalizeSpaces(m.start_time_local) || "Time TBA";
     const summary = safeSummary(m.agenda_summary);
-    const entities = extractEntitiesFromLive({ id, city, date:m.date, body:m.body, meeting_type:m.meeting_type, summary });
+    
+    // UPDATED: more robust ID generation to prevent collisions
+    const id = `LIVE-CO-${city.replace(/\s+/g,"")}-${date}-${hashStr(mType + time + m.source)}`;
+    
+    const entities = extractEntitiesFromLive({ id, city, date, body, meeting_type:mType, summary });
     return {
       id, state:"CO", city,
-      body: normalizeSpaces(m.body),
+      body,
       provider: deriveProvider(m),
-      meeting_type: cleanType(m),
-      date: normalizeSpaces(m.date),
-      time: normalizeSpaces(m.start_time_local) || "Time TBA",
+      meeting_type: mType,
+      date,
+      time,
       status: normalizeSpaces(m.status) || "Scheduled",
       location: normalizeSpaces(m.location) || "",
       agenda_url: normalizeSpaces(m.agenda_url),
@@ -987,7 +1000,7 @@
       votes: { available:false },
       archive: { years:[2024,2025], results:[] },
       isLive:true,
-      topic: inferTopicFromText(summary.join(" ") + " " + (m.meeting_type||"") + " " + (m.body||""))
+      topic: inferTopicFromText(summary.join(" ") + " " + mType + " " + (body||""))
     };
   }
 
@@ -1624,12 +1637,20 @@
       const res = await fetch(url, { cache:"no-store" });
       if(!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
       const data = await res.json();
-      liveCO = { last_checked_mt: normalizeSpaces(data.last_checked_mt), meetings: Array.isArray(data.meetings) ? data.meetings : [] };
+
+      // ROBUST: ensure structure
+      if(!data || typeof data !== 'object') throw new Error("Invalid JSON structure");
+      
+      const rawMeetings = Array.isArray(data.meetings) ? data.meetings : (Array.isArray(data) ? data : []);
+      liveCO = { last_checked_mt: normalizeSpaces(data.last_checked_mt), meetings: rawMeetings };
+      
+      if(!rawMeetings.length) console.warn("Live feed loaded but contains 0 meetings.");
+
       setFreshnessIndicator(liveCO.last_checked_mt);
       error.classList.add("hidden");
       errorMsg.textContent="";
     }catch(e){
-      console.error(e);
+      console.error("Live feed error:", e);
       error.classList.remove("hidden");
       errorMsg.textContent = String(e?.message || e);
       setFreshnessIndicator("");
@@ -1639,15 +1660,21 @@
   }
 
   function boot(){
-    mock = makeMockData();
-    updateNationalKPIs();
-    setRange("7");
-    setChip(chipAgenda,false); setChip(chipTranscript,false); setChip(chipVotes,false);
-    refreshSelectors();
-    renderMap();
-    renderAnalytics();
-    renderFeed();
-    loadLiveCO();
+    try {
+      mock = makeMockData();
+      updateNationalKPIs();
+      setRange("7");
+      setChip(chipAgenda,false); setChip(chipTranscript,false); setChip(chipVotes,false);
+      refreshSelectors();
+      renderMap();
+      renderAnalytics();
+      renderFeed();
+      loadLiveCO();
+    } catch(e) {
+      console.error("Boot error:", e);
+      error.classList.remove("hidden");
+      errorMsg.textContent = "Application failed to initialize: " + String(e);
+    }
   }
   boot();
 })();</script>

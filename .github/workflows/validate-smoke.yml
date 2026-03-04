@@ -1,0 +1,97 @@
+name: Validate Smoke (Post-Deploy)
+
+on:
+  workflow_run:
+    workflows: ["Scrape Build Deploy"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  smoke:
+    name: Live site smoke checks
+    runs-on: ubuntu-latest
+    # For workflow_run events: only proceed if upstream workflow succeeded.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    steps:
+      - name: Set target URLs
+        run: |
+          echo "SITE_URL=https://human83.github.io/MeetingWatch/" >> $GITHUB_ENV
+          echo "JSON_URL=https://human83.github.io/MeetingWatch/data/meetings.json" >> $GITHUB_ENV
+
+      - name: Check homepage returns HTTP 200
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/home.html -w "%{http_code}" "$SITE_URL")
+          echo "Homepage status: $code"
+          test "$code" = "200"
+
+      - name: Check meetings.json returns HTTP 200
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/meetings.json -w "%{http_code}" "$JSON_URL")
+          echo "meetings.json status: $code"
+          test "$code" = "200"
+
+      - name: Validate meetings.json parses and has expected shape
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import json
+          p = '/tmp/meetings.json'
+          with open(p, 'r', encoding='utf-8') as f:
+              data = json.load(f)
+          assert isinstance(data, dict), 'Expected top-level JSON object'
+          assert 'meetings' in data, 'Expected key: meetings'
+          assert isinstance(data['meetings'], list), 'Expected meetings to be an array'
+          print(f"OK: meetings count = {len(data['meetings'])}")
+          PY
+
+  alert_on_failure:
+    name: Open issue on smoke failure
+    runs-on: ubuntu-latest
+    needs: [smoke]
+    if: ${{ always() && needs.smoke.result == 'failure' }}
+    steps:
+      - name: Create/append alert issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = '🚨 Smoke check failed (MeetingWatch)';
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = [
+              'Smoke validation failed after deploy.',
+              '',
+              `Run: ${runUrl}`,
+              `Triggered by: ${context.eventName}`,
+              '',
+              'Please review workflow logs and verify homepage + data/meetings.json health.'
+            ].join('\n');
+
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              per_page: 100
+            });
+
+            const existing = issues.find(i => i.title === title);
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body,
+                labels: ['bot-blocked']
+              });
+            }

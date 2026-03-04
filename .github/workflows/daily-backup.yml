@@ -1,0 +1,31 @@
+name: Daily backup tag
+
+on:
+  schedule:
+    - cron: "5 8 * * *" # 08:05 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  tag-backup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create daily tag
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          DATE=$(date -u +"%Y-%m-%d")
+          TAG="daily-backup-${DATE}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists locally."
+          else
+            git tag -a "$TAG" -m "Daily backup for $DATE"
+          fi
+          git push origin "$TAG" || echo "Tag $TAG might already exist on remote."
